@@ -70,8 +70,9 @@ const VERIFIED_VERDICT = {
 function makeSandbox(t, { transcript = MUTATION_TRANSCRIPT, verdict = VERIFIED_VERDICT, rawVerdictText, withCodex = true, gitRepo = true } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crossverify-hook-'));
   // maxRetries: a detached background child may still be deleting its own
-  // staged files while this rm walks the tree (transient ENOTEMPTY race).
-  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  // staged files while this rm walks the tree (transient ENOTEMPTY race;
+  // EBUSY seen on Windows CI holding the dir for >1s — hence the long tail).
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 250 }));
   const home = path.join(root, 'home');
   const cwd = path.join(root, 'project');
   const bin = path.join(root, 'bin');
