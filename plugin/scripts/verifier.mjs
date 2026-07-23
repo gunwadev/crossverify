@@ -45,11 +45,20 @@ export function formatBlockMessage(verdict, attempt, maxAttempts) {
   if (feedback.length > FEEDBACK_CAP) {
     feedback = `${feedback.slice(0, FEEDBACK_CAP)}\n[feedback truncated by crossverify]`;
   }
+  // Per-claim breakdown so the builder gets structured findings, not just
+  // prose. Claim/evidence text is untrusted verifier output — cap each line.
+  const failedLines = (Array.isArray(verdict.failed) ? verdict.failed : [])
+    .filter((f) => f && typeof f.claim === 'string')
+    .map((f) => {
+      const ev = typeof f.evidence === 'string' ? f.evidence.split(/(?<=\.) /)[0] : '';
+      return `  ✗ ${f.claim.slice(0, 200)}${ev ? ` — ${ev.slice(0, 300)}` : ''}`;
+    });
   return [
     '[crossverify] An independent verifier (different AI vendor, read-only) checked your last',
     `turn and found ${n} failed claim(s). Fix the issues below, then finish normally.`,
     'Do NOT disable the verifier or edit its config — fix the work instead.',
     `Attempt ${attempt} of ${maxAttempts}; after ${maxAttempts} the verifier defers and lets you stop.`,
+    ...(failedLines.length ? ['Failed claims:', ...failedLines] : []),
     '---',
     feedback,
   ].join('\n');

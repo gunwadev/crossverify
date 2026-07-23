@@ -156,9 +156,27 @@ test('formatBlockMessage matches the spec Agent UX template exactly', () => {
     'turn and found 2 failed claim(s). Fix the issues below, then finish normally.',
     'Do NOT disable the verifier or edit its config — fix the work instead.',
     'Attempt 1 of 2; after 2 the verifier defers and lets you stop.',
+    'Failed claims:',
+    '  ✗ tests pass — node --test fails',
+    '  ✗ lint clean — eslint reports 3 errors',
     '---',
     'src/app.mjs:12 — claim "tests pass" is false: node --test fails. Fix the assertion.',
   ].join('\n'));
+});
+
+test('formatBlockMessage caps untrusted per-claim text and skips malformed entries', () => {
+  const msg = formatBlockMessage({
+    status: 'failed',
+    failed: [
+      { claim: 'c'.repeat(500), evidence: 'e'.repeat(900) },
+      { notclaim: 'ignored' },
+      null,
+    ],
+    feedback: 'fix',
+  }, 1, 2);
+  const line = msg.split('\n').find((l) => l.startsWith('  ✗'));
+  assert.ok(line.length <= 4 + 200 + 3 + 300 + 10, `claim line too long: ${line.length}`);
+  assert.equal(msg.split('\n').filter((l) => l.startsWith('  ✗')).length, 1);
 });
 
 test('formatBlockMessage counts from failed[] length when claims_failed is absent', () => {

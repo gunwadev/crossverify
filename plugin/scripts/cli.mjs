@@ -209,10 +209,30 @@ function cmdReport(argv) {
     process.exit(0);
   }
   const stats = statSync(reportPath);
+  // Colors only on a real terminal; piped output stays plain.
+  const tty = process.stdout.isTTY === true;
+  const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s);
+  const firstSentence = (s) => (typeof s === 'string' ? s.split(/(?<=\.) /)[0] : '');
   console.log(`crossverify report — ${reportPath}`);
   console.log(`status:         ${verdict.status ?? 'unknown'}`);
   console.log(`claims_failed:  ${countFailedClaims(verdict)}`);
   console.log(`generated:      ${stats.mtime.toISOString()}`);
+  const rows = [
+    ...(Array.isArray(verdict.verified) ? verdict.verified : []).map((x) => ['32', '✓ verified', x]),
+    ...(Array.isArray(verdict.failed) ? verdict.failed : []).map((x) => ['31', '✗ failed  ', x]),
+    ...(Array.isArray(verdict.could_not_verify) ? verdict.could_not_verify : []).map((x) => ['33', '? unverified', x]),
+  ].filter(([, , x]) => x && typeof x.claim === 'string');
+  if (rows.length) {
+    console.log();
+    for (const [code, label, x] of rows) {
+      const detail = firstSentence(x.evidence ?? x.reason);
+      console.log(`  ${c(code, label)}  ${x.claim}${detail ? c('2', ` — ${detail}`) : ''}`);
+    }
+    console.log();
+    if (verdict.status === 'failed') console.log(`  ${c('1;31', '■ BLOCK')} — builder was sent the failed claims as feedback`);
+    else if (verdict.status === 'verified') console.log(`  ${c('1;32', '■ PASS')} — all claims verified`);
+    else console.log(`  ${c('1;33', `■ ${String(verdict.status ?? 'unknown').toUpperCase()}`)}`);
+  }
   console.log('Run "crossverify report --json" for the full verdict.');
   process.exit(0);
 }
