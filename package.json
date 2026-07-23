@@ -1,0 +1,24 @@
+{
+  "name": "crossverify",
+  "version": "0.1.0",
+  "description": "Cross-vendor verifier for Claude Code: a Stop hook launches Codex (read-only) to independently check the builder agent's last turn.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "crossverify": "./plugin/scripts/cli.mjs"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "files": [
+    "plugin/",
+    "install.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {},
+  "devDependencies": {}
+}

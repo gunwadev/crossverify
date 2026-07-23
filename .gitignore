@@ -1,0 +1,29 @@
+# dogfooding reports in this repo
+.crossverify/
+
+# any legacy report dirs
+*-reports/
+
+# attempt counters, session state
+state/
+
+# NEVER commit — auth.json, session caches (publish-checklist rule)
+codex-home/
+
+.env
+*.log
+
+# defensive; project has zero deps
+node_modules/
+
+# sdd session scratch
+.superpowers/
+
+# local Claude Code state — machine-specific permission paths, never commit
+.claude/settings.local.json
+# local dogfood toggle for this repo — never publish
+.claude/crossverify.conf
+
+# local working notes — never commit
+decisions.md
+docs/superpowers/

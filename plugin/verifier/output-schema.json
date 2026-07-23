@@ -1,0 +1,134 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VerifierReport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "confidence",
+    "claims_total",
+    "claims_verified",
+    "claims_failed",
+    "claims_unverified",
+    "verified",
+    "failed",
+    "could_not_verify",
+    "external_claims",
+    "feedback",
+    "needs_from_user"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "failed",
+        "unsure"
+      ],
+      "description": "verified = all critical claims proven true. failed = at least one critical claim disproven AND feedback contains a concrete fix. unsure = could not verify enough to judge; do not block."
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "PERFECT",
+        "VERIFIED",
+        "PARTIAL",
+        "FEEDBACK",
+        "FAILED"
+      ],
+      "description": "PERFECT: every claim verified, zero gaps. VERIFIED: all checked passed, minor non-blocking gaps allowed. PARTIAL: no failures but significant unverifiable gaps. FEEDBACK: claims failed and feedback was given. FAILED: could not verify at all (harness broke or no oracle)."
+    },
+    "claims_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "claims_verified": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "claims_failed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "claims_unverified": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "verified": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "claim",
+          "evidence"
+        ],
+        "properties": {
+          "claim": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string",
+            "description": "Exact tool output or command result that proves the claim."
+          }
+        }
+      }
+    },
+    "failed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "claim",
+          "evidence"
+        ],
+        "properties": {
+          "claim": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string",
+            "description": "What you observed that contradicts the claim."
+          }
+        }
+      }
+    },
+    "could_not_verify": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "claim",
+          "reason"
+        ],
+        "properties": {
+          "claim": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why you could not prove or disprove (missing oracle, ambiguous, harness limit)."
+          }
+        }
+      }
+    },
+    "external_claims": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "string"
+      },
+      "description": "When RESEARCH is on: claims about the EXTERNAL world (current versions, current events) that local checks cannot settle, phrased as short keyword topics (3-8 words). NEVER include file contents, file paths, code, secrets, or any token longer than 20 characters \u2014 topics are handed to a separate search process. Empty array when RESEARCH is off or none exist."
+    },
+    "feedback": {
+      "type": "string",
+      "description": "Concrete corrective message delivered to the builder. Imperative voice, exact paths, exact rule. Empty unless status=failed."
+    },
+    "needs_from_user": {
+      "type": "string",
+      "description": "What the engineer should add to the verifier (rule, tool, fixture, oracle) to make the next run more complete. Empty when nothing's needed."
+    }
+  }
+}

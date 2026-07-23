@@ -1,0 +1,13 @@
+# Force LF in working trees on every platform. Windows checkouts with
+# core.autocrlf=true otherwise get CRLF, which breaks byte-exact content
+# assertions and any tooling that reads these files strictly.
+* text=auto
+*.mjs text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+LICENSE text eol=lf

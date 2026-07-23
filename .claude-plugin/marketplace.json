@@ -1,0 +1,13 @@
+{
+  "name": "crossverify",
+  "owner": {
+    "name": "gunwa"
+  },
+  "plugins": [
+    {
+      "name": "crossverify",
+      "source": "./plugin"
+    }
+  ],
+  "strict": true
+}
