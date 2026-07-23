@@ -215,8 +215,9 @@ test('crossverify report shows the newest report summary', () => {
   );
   const result = runCli(['report'], { home, cwd });
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /status:\s+verified/);
-  assert.match(result.stdout, /claims_failed:\s+0/);
+  assert.match(result.stdout, /crossverify · VERIFIED/);
+  assert.match(result.stdout, /0 verified · 0 failed · 0 unverified/);
+  assert.match(result.stdout, /■ PASS — all claims verified/);
 });
 
 test('crossverify report --json prints the raw verdict JSON', () => {

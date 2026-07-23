@@ -209,31 +209,43 @@ function cmdReport(argv) {
     process.exit(0);
   }
   const stats = statSync(reportPath);
-  // Colors only on a real terminal; piped output stays plain.
+  // Colors only on a real terminal; piped output stays plain. Zero deps:
+  // raw ANSI, Playwright-reporter-flavored layout.
   const tty = process.stdout.isTTY === true;
   const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s);
-  const firstSentence = (s) => (typeof s === 'string' ? s.split(/(?<=\.) /)[0] : '');
-  console.log(`crossverify report — ${reportPath}`);
-  console.log(`status:         ${verdict.status ?? 'unknown'}`);
-  console.log(`claims_failed:  ${countFailedClaims(verdict)}`);
-  console.log(`generated:      ${stats.mtime.toISOString()}`);
+  // One terminal line even at narrow widths — wrapped continuations lose the
+  // indent and read as noise, so truncate instead.
+  const firstSentence = (s) => {
+    if (typeof s !== 'string') return '';
+    const first = s.split(/(?<=\.) /)[0];
+    return first.length > 120 ? `${first.slice(0, 120)}…` : first;
+  };
+  const status = String(verdict.status ?? 'unknown');
+  const statusColor = { verified: '1;32', failed: '1;31' }[status] ?? '1;33';
+  const when = stats.mtime.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+
+  console.log();
+  console.log(`  ${c('1', 'crossverify')} ${c('2', '·')} ${c(statusColor, status.toUpperCase())}   ${c('2', `${path.basename(reportPath)} · ${when}`)}`);
+  console.log();
   const rows = [
-    ...(Array.isArray(verdict.verified) ? verdict.verified : []).map((x) => ['32', '✓ verified', x]),
-    ...(Array.isArray(verdict.failed) ? verdict.failed : []).map((x) => ['31', '✗ failed  ', x]),
-    ...(Array.isArray(verdict.could_not_verify) ? verdict.could_not_verify : []).map((x) => ['33', '? unverified', x]),
+    ...(Array.isArray(verdict.verified) ? verdict.verified : []).map((x) => ['32', '✓', x]),
+    ...(Array.isArray(verdict.failed) ? verdict.failed : []).map((x) => ['31', '✗', x]),
+    ...(Array.isArray(verdict.could_not_verify) ? verdict.could_not_verify : []).map((x) => ['33', '?', x]),
   ].filter(([, , x]) => x && typeof x.claim === 'string');
-  if (rows.length) {
-    console.log();
-    for (const [code, label, x] of rows) {
-      const detail = firstSentence(x.evidence ?? x.reason);
-      console.log(`  ${c(code, label)}  ${x.claim}${detail ? c('2', ` — ${detail}`) : ''}`);
-    }
-    console.log();
-    if (verdict.status === 'failed') console.log(`  ${c('1;31', '■ BLOCK')} — builder was sent the failed claims as feedback`);
-    else if (verdict.status === 'verified') console.log(`  ${c('1;32', '■ PASS')} — all claims verified`);
-    else console.log(`  ${c('1;33', `■ ${String(verdict.status ?? 'unknown').toUpperCase()}`)}`);
+  for (const [code, mark, x] of rows) {
+    console.log(`  ${c(code, mark)} ${x.claim}`);
+    const detail = firstSentence(x.evidence ?? x.reason);
+    if (detail) console.log(`      ${c('2', `└ ${detail}`)}`);
   }
-  console.log('Run "crossverify report --json" for the full verdict.');
+  if (rows.length) console.log();
+  const nv = (verdict.verified ?? []).length, nf = countFailedClaims(verdict), nu = (verdict.could_not_verify ?? []).length;
+  console.log(`  ${c('32', `${nv} verified`)} ${c('2', '·')} ${c(nf ? '31' : '2', `${nf} failed`)} ${c('2', '·')} ${c(nu ? '33' : '2', `${nu} unverified`)}`);
+  console.log();
+  if (status === 'failed') console.log(`  ${c('1;31', '■ BLOCK')} — builder was sent the failed claims as feedback`);
+  else if (status === 'verified') console.log(`  ${c('1;32', '■ PASS')} — all claims verified`);
+  else console.log(`  ${c('1;33', `■ ${status.toUpperCase()}`)}`);
+  console.log(`  ${c('2', '→ crossverify report --json for the full verdict')}`);
+  console.log();
   process.exit(0);
 }
 
