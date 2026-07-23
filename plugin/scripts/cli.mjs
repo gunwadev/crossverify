@@ -166,6 +166,24 @@ function cmdStatus(argv) {
     process.exit(0);
   }
   printStatusTable(config);
+  // "status" must answer "did it actually run?", not just show config —
+  // surface the newest report for this project inline.
+  const lastReport = findNewestJsonReport(
+    reportsDir(config, process.cwd()),
+    config.output === 'global' ? `${projectKey(process.cwd())}-` : ''
+  );
+  if (lastReport) {
+    try {
+      const v = JSON.parse(readFileSync(lastReport, 'utf8'));
+      const ageMin = Math.round((Date.now() - statSync(lastReport).mtimeMs) / 60000);
+      const age = ageMin < 60 ? `${ageMin}m ago` : `${Math.round(ageMin / 60)}h ago`;
+      console.log(`\nlast run: ${v.status ?? 'unknown'} (${age}) — crossverify report for details`);
+    } catch {
+      console.log(`\nlast run: unreadable report at ${lastReport}`);
+    }
+  } else {
+    console.log('\nlast run: none recorded for this project');
+  }
   if (config.notes && config.notes.length > 0) {
     console.log('');
     for (const note of config.notes) {
