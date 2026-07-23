@@ -198,11 +198,24 @@ test('setup.mjs accepts piped answers delivered in one chunk (agent/Bash-tool fl
   const tmp = fs.mkdtempSync(fs.realpathSync(os.tmpdir()) + path.sep + 'cv-piped-');
   const proj = path.join(tmp, 'proj');
   fs.mkdirSync(proj);
+  // Hermetic PATH with a fake codex: inheriting the real PATH made this test
+  // depend on a locally installed codex (failed on codex-less CI).
+  const bin = path.join(tmp, 'bin');
+  fs.mkdirSync(bin);
+  installFakeCodex(bin);
   const setup = path.join(process.cwd(), 'plugin', 'scripts', 'setup.mjs');
+  const env = {
+    HOME: tmp, USERPROFILE: tmp,
+    PATH: fakePathEntries(bin).join(path.delimiter),
+    CLAUDE_PLUGIN_ROOT: path.dirname(path.dirname(setup)),
+  };
+  for (const k of ['SystemRoot', 'PATHEXT', 'ComSpec']) {
+    if (process.env[k] !== undefined) env[k] = process.env[k];
+  }
   const res = spawnSync(process.execPath, [setup], {
     encoding: 'utf8',
     cwd: proj,
-    env: { ...process.env, HOME: tmp, USERPROFILE: tmp, CLAUDE_PLUGIN_ROOT: path.dirname(path.dirname(setup)) },
+    env,
     input: 'project\nproject\n', // both answers in ONE chunk — readline would drop the second
   });
   const out = res.stdout + res.stderr;
