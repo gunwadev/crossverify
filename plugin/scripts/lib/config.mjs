@@ -47,6 +47,15 @@ const ENUMS = {
   failmode: ['open', 'closed'],
 };
 
+// Keys whose value is a bare NAME, not free text. `pack` becomes a path
+// segment (verifier.mjs joins it into the plugin's rules dir), so an
+// unvalidated value is a path-traversal primitive: a project conf saying
+// pack=../../../repo/evil made the hook stage a rule pack the builder wrote
+// itself, which is the whole verifier defeated by one line of config.
+const NAMES = {
+  pack: /^[A-Za-z0-9][A-Za-z0-9._-]*$/,
+};
+
 function readConfFile(confPath) {
   let text;
   try {
@@ -68,6 +77,9 @@ export function resolveConfig({ cwd = process.cwd(), env = process.env } = {}) {
       config[key] = raw === '1';
     } else if (ENUMS[key] && !ENUMS[key].includes(raw)) {
       notes.push(`invalid ${key}=${raw} from ${layer} ignored`);
+      return;
+    } else if (NAMES[key] && !NAMES[key].test(raw)) {
+      notes.push(`invalid ${key}=${raw} from ${layer} ignored (not a bare name)`);
       return;
     } else {
       config[key] = raw;
@@ -103,6 +115,13 @@ export function resolveConfig({ cwd = process.cwd(), env = process.env } = {}) {
       }
       continue;
     }
+    // A locked config pins the rule pack too. Swapping packs rewrites what
+    // "failed" even means, so it is an enforcement downgrade in everything but
+    // name — and unlike mode/failmode it leaves `enabled` reading 1.
+    if (key === 'pack' && config.lock && raw !== config.pack) {
+      notes.push(`project pack=${raw} ignored: locked`);
+      continue;
+    }
     const isDowngrade = (key === 'mode' && raw === 'background' && config.mode === 'foreground')
       || (key === 'failmode' && raw === 'open' && config.failmode === 'closed');
     if (isDowngrade) {
@@ -119,8 +138,17 @@ export function resolveConfig({ cwd = process.cwd(), env = process.env } = {}) {
   const envRaw = env.CROSSVERIFY;
   if (envRaw !== undefined && envRaw !== '') {
     if (envRaw === '0') {
-      config.enabled = false;
-      decidedBy.enabled = 'env';
+      // The lock gates the env layer too. Project settings files can set env
+      // vars for hook processes, so an ungated CROSSVERIFY=0 was a
+      // project-level bypass of the one thing the lock promises. Either way
+      // this is never silent — an invisible disable is the real defect.
+      if (config.lock) {
+        notes.push('env CROSSVERIFY=0 ignored: locked');
+      } else {
+        config.enabled = false;
+        decidedBy.enabled = 'env';
+        notes.push('env disable honored (lock off)');
+      }
     } else if (envRaw === '1') {
       config.enabled = true;
       decidedBy.enabled = 'env';
@@ -219,7 +247,10 @@ export function logPath() {
   return path.join(stateDir(), 'hook.log');
 }
 
+// 0700/0600: the log records project paths and codex stderr tails, and the
+// state dir sits beside reports carrying transcript content. On a shared host
+// the default umask would leave both readable by every local user.
 export function log(msg) {
-  fs.mkdirSync(stateDir(), { recursive: true });
-  fs.appendFileSync(logPath(), `${new Date().toISOString()} ${msg}\n`);
+  fs.mkdirSync(stateDir(), { recursive: true, mode: 0o700 });
+  fs.appendFileSync(logPath(), `${new Date().toISOString()} ${msg}\n`, { mode: 0o600 });
 }

@@ -18,9 +18,22 @@ const VALID_STATUSES = new Set(['verified', 'failed', 'unsure']);
 // concrete command once, share it between the gate probe (probeCodex) and
 // the real run (runCodex), so both agree about how codex actually launches.
 // Non-win32 is untouched: spawn('codex', ...) already works there.
+// Quote one argument for a cmd.exe command line. Inside double quotes cmd
+// treats &, |, (, ) and > as literal text. We never legitimately pass an
+// argument containing a quote, and escaping quotes for cmd is a minefield, so
+// refuse instead of guessing — runCodex turns the throw into a normal
+// {ok:false} and fail-open holds.
+function quoteForCmd(arg) {
+  const s = String(arg);
+  if (s.includes('"')) {
+    throw new Error(`refusing to pass an argument containing a quote to cmd.exe: ${s}`);
+  }
+  return `"${s}"`;
+}
+
 export function resolveCodexCommand() {
   if (process.platform !== 'win32') {
-    return { command: 'codex', wrap: (args) => args };
+    return { command: 'codex', wrap: (args) => args, verbatim: false };
   }
   // PATHEXT-defaulted env: hook processes can run with a stripped environment;
   // without PATHEXT, where.exe never matches codex.cmd/codex.exe.
@@ -33,25 +46,51 @@ export function resolveCodexCommand() {
     .map((line) => line.trim())
     .filter(Boolean);
   const exe = candidates.find((c) => c.toLowerCase().endsWith('.exe'));
-  if (exe) return { command: exe, wrap: (args) => args };
+  if (exe) return { command: exe, wrap: (args) => args, verbatim: false };
   const cmd = candidates.find((c) => c.toLowerCase().endsWith('.cmd')) || candidates[0];
   if (cmd) {
-    // .cmd shims can't be spawned directly with shell:false on Windows —
-    // invoke them through cmd.exe instead. The argv passed through here is
-    // only our static prompt asset + local paths (no untrusted repo content
-    // flows through the shell), so this is not a command-injection surface.
-    return { command: 'cmd.exe', wrap: (args) => ['/d', '/s', '/c', cmd, ...args] };
+    // .cmd shims can't be spawned directly with shell:false on Windows, so the
+    // argv crosses cmd.exe — where &, |, (, ) are live operators. Node quotes
+    // an argument only when it contains a space, tab, or quote, so a
+    // space-free `gpt-5&whoami&rem` reaching --model (via CROSSVERIFY_MODEL)
+    // or --cd (via a project directory name) EXECUTED. Confirmed on Windows 11
+    // / Node 22; Node's CVE-2024-27980 mitigation does not apply because the
+    // spawned file is cmd.exe, not a .cmd. So: quote every argument ourselves
+    // and hand the line over verbatim (windowsVerbatimArguments), which stops
+    // Node from re-quoting what we just quoted.
+    //
+    // The extra outer quote pair is load-bearing: with /s, cmd.exe strips the
+    // first and last character of the command line when both are quotes and
+    // runs the remainder. Without it, cmd would eat our first and last real
+    // quotes and mis-parse every argument.
+    return {
+      command: 'cmd.exe',
+      wrap: (args) => ['/d', '/s', '/c', `"${[cmd, ...args].map(quoteForCmd).join(' ')}"`],
+      verbatim: true,
+    };
   }
   // Not found: fall through to a plain 'codex' spawn so the ENOENT surfaces
   // through the normal error path (caller decides fail-open behavior).
-  return { command: 'codex', wrap: (args) => args };
+  return { command: 'codex', wrap: (args) => args, verbatim: false };
+}
+
+// The ONE place that knows how to launch codex synchronously. The cmd.exe lane
+// quotes its own arguments, so every caller must also set
+// windowsVerbatimArguments — a contract that is trivially easy to miss (and
+// was missed once: setup's detectCodex silently stopped finding codex on
+// Windows). Callers use this instead of resolveCodexCommand + spawnSync.
+export function codexSpawnSync(args, options = {}) {
+  const resolved = resolveCodexCommand();
+  return spawnSync(resolved.command, resolved.wrap(args), {
+    ...options,
+    windowsVerbatimArguments: resolved.verbatim === true,
+  });
 }
 
 // Shared PATH probe used by both the Stop-hook Gate 6 check (verifier.mjs)
 // and setup's Codex-present check — same resolution logic as runCodex.
 export function probeCodex() {
-  const resolved = resolveCodexCommand();
-  const probe = spawnSync(resolved.command, resolved.wrap(['--version']), { stdio: 'ignore' });
+  const probe = codexSpawnSync(['--version'], { stdio: 'ignore' });
   return !probe.error && probe.status === 0;
 }
 
@@ -84,7 +123,10 @@ function stripFences(text) {
 }
 
 export function runCodex({ prompt, cwd, model, schemaPath, timeoutMs, codexHome, search = false, validate = validateVerdict }) {
-  const lastMsgFile = path.join(os.tmpdir(), `crossverify-last-msg-${randomUUID()}.txt`);
+  // mkdtemp gives a 0700 directory, so the verdict (which quotes transcript
+  // content) isn't world-readable in a shared /tmp for the life of the run.
+  const msgDir = fs.mkdtempSync(path.join(os.tmpdir(), `crossverify-${randomUUID().slice(0, 8)}-`));
+  const lastMsgFile = path.join(msgDir, 'last-msg.txt');
   // Prompt travels via STDIN (`codex exec -`), never argv: on Windows the
   // .cmd-shim lane re-parses the command line through cmd.exe, where embedded
   // quotes/newlines/&/> in the prompt are live metacharacters, and argv also
@@ -115,10 +157,12 @@ export function runCodex({ prompt, cwd, model, schemaPath, timeoutMs, codexHome,
       if (settled) return;
       settled = true;
       // Keep lastMsgFile only when the caller gets its path back for raw
-      // archival; every other outcome unlinks it (best effort) so failed and
-      // timed-out runs don't litter the tmpdir.
+      // archival; every other outcome removes it (best effort) so failed and
+      // timed-out runs don't litter the tmpdir. The caller archives and
+      // deletes the raw file, leaving an empty dir the next sweep-free run
+      // never notices — so only remove the dir when we own the file.
       if (!result.rawPath) {
-        try { fs.unlinkSync(lastMsgFile); } catch { /* best effort */ }
+        try { fs.rmSync(msgDir, { recursive: true, force: true }); } catch { /* best effort */ }
       }
       resolve(result);
     };
@@ -160,6 +204,9 @@ export function runCodex({ prompt, cwd, model, schemaPath, timeoutMs, codexHome,
         env,
         signal,
         windowsHide: true,
+        // The cmd.exe lane quotes its own arguments (see resolveCodexCommand);
+        // letting Node re-quote them on top would corrupt the command line.
+        windowsVerbatimArguments: resolved.verbatim === true,
         stdio: ['pipe', 'ignore', 'pipe'],
       });
     } catch (err) {

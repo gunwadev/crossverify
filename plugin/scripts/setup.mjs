@@ -12,12 +12,13 @@ import { fileURLToPath } from 'node:url';
 import { isMainModule } from './lib/entry.mjs';
 import { setConfKey, globalConfPath, projectConfPath } from './lib/config.mjs';
 import { addHook, quoteForCommand } from './lib/settings.mjs';
-import { resolveCodexCommand } from './lib/codex.mjs';
+import { codexSpawnSync } from './lib/codex.mjs';
 import { createPrompter, StdinClosedError } from './lib/prompt.mjs';
 
 function detectCodex() {
-  const resolved = resolveCodexCommand();
-  const res = spawnSync(resolved.command, resolved.wrap(['--version']), { encoding: 'utf8' });
+  // codexSpawnSync, not a raw spawnSync: the Windows cmd.exe lane pre-quotes
+  // its arguments and needs windowsVerbatimArguments to match.
+  const res = codexSpawnSync(['--version'], { encoding: 'utf8' });
   if (res.error || res.status !== 0) return null;
   return (res.stdout || '').trim();
 }

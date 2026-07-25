@@ -13,17 +13,53 @@ import { runCodex, validateVerdict } from './codex.mjs';
 
 const MAX_TOPICS = 3;
 const MAX_TOPIC_CHARS = 80;
-// Secret-shaped: one unbroken run of 20+ non-space chars (API keys, tokens,
-// hashes, paths). Real research topics are short natural-language keywords.
-const SECRET_TOKEN_RE = /\S{20,}/;
+const MAX_TOTAL_CHARS = 120; // budget across ALL topics, not merely each one
+const MAX_TOKEN_CHARS = 20;
 
-export function sanitizeTopics(raw) {
+// This gate is an ALLOWLIST, deliberately. The previous rule rejected one
+// unbroken run of 20+ non-space chars, which a prompt-injected verify pass
+// defeated by spelling a secret out across spaces
+// ("sk-ant-api03 -AAAABBBB CCCCDDDD ...") — every chunk passed. Topics are
+// meant to be short natural-language keywords, so require every token to look
+// like a word, a version number, or a short acronym.
+const TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9.'+#-]*$/;
+const isSecretish = (t) =>
+  (t.length > 8 && /[A-Za-z]/.test(t) && /[0-9]/.test(t)) || // key/hash shaped
+  (t.length >= 4 && t === t.toUpperCase() && /[A-Z]/.test(t)); // ALLCAPS run; API/LTS/CLI still fine
+
+// NOTE ON RESIDUAL RISK: shape filtering NARROWS this channel, it does not
+// close it. An attacker in full control of the verify pass can still spell
+// ~120 characters in innocent-looking words. That is the honest bound: a
+// short, low-bandwidth channel, not zero. Hence the logging — a suppressed
+// attempt should be visible in hook.log, never silent.
+export function sanitizeTopics(raw, log = () => {}) {
   if (!Array.isArray(raw)) return [];
-  return raw
-    .filter((t) => typeof t === 'string')
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0 && t.length <= MAX_TOPIC_CHARS && !SECRET_TOKEN_RE.test(t))
-    .slice(0, MAX_TOPICS);
+  const out = [];
+  let budget = MAX_TOTAL_CHARS;
+  for (const item of raw) {
+    if (out.length >= MAX_TOPICS) break;
+    if (typeof item !== 'string') continue;
+    const t = item.trim();
+    if (t === '') continue;
+    if (t.length > MAX_TOPIC_CHARS) {
+      log('research: dropped over-long topic');
+      continue;
+    }
+    const bad = t
+      .split(/\s+/)
+      .find((tok) => tok.length > MAX_TOKEN_CHARS || !TOKEN_RE.test(tok) || isSecretish(tok));
+    if (bad !== undefined) {
+      log('research: dropped topic containing a non-word token');
+      continue;
+    }
+    if (t.length > budget) {
+      log('research: dropped topic over the total egress budget');
+      continue;
+    }
+    budget -= t.length;
+    out.push(t);
+  }
+  return out;
 }
 
 export function buildResearchPrompt(topics) {
@@ -45,7 +81,7 @@ export function buildResearchPrompt(topics) {
 // (so foreground mode blocks) — bounded by the same attempt counter as any
 // other failure. It never downgrades and never touches `verified`.
 export async function applyResearch(verdict, { model, timeoutMs, codexHome, schemaPath, log }) {
-  const topics = sanitizeTopics(verdict.external_claims);
+  const topics = sanitizeTopics(verdict.external_claims, log);
   if (topics.length === 0) return verdict;
 
   const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'crossverify-research-'));

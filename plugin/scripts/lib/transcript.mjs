@@ -7,56 +7,89 @@
 //   Fallback: no such line -> return the whole text (conservative — prefer a
 //   false-positive verify over a false-negative skip).
 // - hasMutation: true if the slice contains a Write/Edit/MultiEdit/NotebookEdit
-//   tool call, or a Bash tool call plus a match of the mutating-verb regex.
+//   tool call, or a Bash tool call whose command is not provably read-only
+//   (allowlist — see READ_ONLY below; unknown commands count as mutations).
 
 const WRITE_TOOL_RE = /"name":"(Write|Edit|MultiEdit|NotebookEdit)"/;
 const BASH_TOOL_RE = /"name":"Bash"/;
 
-// Faithful JS port of mutating_verb_re from the bash hook. Translation notes:
-// grep -E scans line by line, so ^ means start-of-line — the 'm' flag preserves
-// that; POSIX [[:alnum:]] becomes [a-zA-Z0-9]. Everything else is verbatim.
-//
-// Windows/PowerShell coverage added on top of the POSIX port: without it, a
-// Windows agent's `del`/`Remove-Item`/etc. would silently skip verification
-// (a false-negative gate — the worst failure mode for a verifier). The short
-// verbs (del, erase, rd, rmdir, move, ren, xcopy, robocopy, mklink) reuse the
-// exact same word-bounded shape as the POSIX verbs above (non-alnum-or-start
-// on the left, a literal space on the right) so e.g. "model" (contains "del")
-// or "guard"/"card" (contain "rd") never match. The PowerShell cmdlets
-// (Remove-Item, Move-Item, Copy-Item, New-Item, Set-Content, Add-Content,
-// Out-File) are conventionally PascalCase but PowerShell itself is
-// case-insensitive, so the whole regex now carries the 'i' flag. That
-// intentionally widens the existing POSIX alternatives too (bare "RM" etc.
-// now also matches) — accepted as a conservative trade-off: a false-positive
-// verify (checked when not strictly necessary) is safe by design, a
-// false-negative skip is not.
-const MUTATING_VERB_RE = new RegExp(
-  '(git (commit|push|merge|rebase|reset|apply|stash)' +
-    '|(^|[^a-zA-Z0-9])(rm|mv|cp|mkdir|touch|chmod|chown|ln|dd|kill|truncate' +
-      '|del|erase|rd|rmdir|move|ren|xcopy|robocopy|mklink) ' +
-    '|sed[^"]*-i' +
-    '|>>' +
-    '|[^<]> [^&]' +
-    '|tee ' +
-    '|npm (install|ci|run|uninstall)' +
-    '|yarn (add|install|remove)' +
-    '|pnpm (add|install|remove)' +
-    '|pip3? install' +
-    '|brew install' +
-    '|apt(-get)? install' +
-    '|cargo install' +
-    '|go install' +
-    '|make install' +
-    '|curl[^"]*-o ' +
-    '|wget ' +
-    '|patch ' +
-    '|launchctl ' +
-    '|defaults write' +
-    '|xargs rm' +
-    '|find[^"]*-delete' +
-    '|(^|[^a-zA-Z0-9])(Remove-Item|Move-Item|Copy-Item|New-Item|Set-Content|Add-Content|Out-File) )',
-  'mi',
-);
+// The gate is an ALLOWLIST: anything not proven read-only counts as a
+// mutation. The previous denylist of mutating verbs let a builder skip its own
+// auditor by writing files through an interpreter — `node -e`, `python3 -c`,
+// `perl -pi`, plus plain misses like `git checkout -- .` and `install`, all
+// scored "no mutation" and verification never ran. Since this gate exists only
+// to save a codex call, the safe direction is a needless verify, never a
+// silent skip.
+const READ_ONLY = new Set([
+  'ls', 'cat', 'bat', 'head', 'tail', 'wc', 'grep', 'rg', 'ag', 'find', 'fd', 'pwd', 'echo',
+  'printf', 'which', 'type', 'whoami', 'id', 'hostname', 'date', 'uname', 'env', 'printenv',
+  'sort', 'uniq', 'cut', 'tr', 'column', 'diff', 'file', 'stat', 'du', 'df', 'tree', 'jq', 'yq',
+  'basename', 'dirname', 'realpath', 'readlink', 'sleep', 'true', 'false', 'test', 'node', 'npx',
+  'python', 'python3', 'go', 'cargo', 'ruby', 'java', 'dotnet', 'tsc', 'curl', 'wget', 'ping',
+  'dig', 'host', 'nc', 'ps', 'top', 'git', 'npm', 'pnpm', 'yarn', 'docker', 'kubectl', 'gh',
+  'man', 'help', 'history', 'tldr', 'less', 'more',
+]);
+
+// Binaries that are read-only only in certain modes.
+const SUBCOMMANDS = {
+  git: new Set(['status', 'log', 'diff', 'show', 'branch', 'remote', 'rev-parse', 'ls-files',
+    'blame', 'describe', 'tag', 'config', 'shortlog', 'grep', 'cat-file', 'symbolic-ref',
+    'worktree']),
+  npm: new Set(['ls', 'list', 'view', 'info', 'test', 'why', 'outdated', 'ping', 'whoami', 'root',
+    'prefix', 'config']),
+  pnpm: new Set(['ls', 'list', 'view', 'info', 'test', 'why', 'outdated', 'root']),
+  yarn: new Set(['list', 'info', 'why', 'test', 'versions']),
+  docker: new Set(['ps', 'images', 'logs', 'inspect', 'version', 'info', 'port', 'top', 'stats',
+    'diff']),
+  kubectl: new Set(['get', 'describe', 'logs', 'explain', 'version', 'top', 'api-resources',
+    'config']),
+  gh: new Set(['pr', 'issue', 'repo', 'run', 'api', 'auth', 'release', 'search', 'workflow']),
+  cargo: new Set(['check', 'tree', 'metadata', 'search', '--version', 'fmt']),
+  go: new Set(['version', 'list', 'vet', 'env', 'doc']),
+};
+
+// Flags that turn an otherwise read-only binary into a writer.
+const WRITING_FLAG_RE =
+  /(^|\s)(-o|--output|-O|--output-document|-w|--write|-i|--in-place|--fix|-e|--eval|-c|--command|-p|-delete|-exec|-execdir|-ok|-okdir)(\s|=|$)/;
+const REDIRECT_RE = /(^|[^0-9<>])>{1,2}[^&]|(^|\s)\|\s*tee(\s|$)/;
+
+// Pull the actual Bash commands out of the slice. Returns null when they can't
+// be read, and the caller then assumes a mutation rather than guessing.
+function bashCommands(slice) {
+  const found = [];
+  for (const line of slice.split('\n')) {
+    if (!BASH_TOOL_RE.test(line)) continue;
+    let rec;
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      return null;
+    }
+    const content = rec?.message?.content;
+    if (!Array.isArray(content)) return null;
+    for (const block of content) {
+      if (block?.type === 'tool_use' && block?.name === 'Bash') {
+        if (typeof block?.input?.command !== 'string') return null;
+        found.push(block.input.command);
+      }
+    }
+  }
+  return found;
+}
+
+function segmentMutates(seg) {
+  const s = seg.trim();
+  if (s === '') return false;
+  if (REDIRECT_RE.test(s)) return true;
+  const tokens = s.split(/\s+/);
+  let i = 0;
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++; // VAR=x prefix
+  const bin = (tokens[i] || '').replace(/^.*[\\/]/, '').toLowerCase();
+  if (!READ_ONLY.has(bin)) return true;
+  if (SUBCOMMANDS[bin] && !SUBCOMMANDS[bin].has((tokens[i + 1] || '').toLowerCase())) return true;
+  if (WRITING_FLAG_RE.test(s)) return true;
+  return false;
+}
 
 export function sliceLastTurn(text) {
   const lines = text.split('\n');
@@ -72,6 +105,8 @@ export function sliceLastTurn(text) {
 
 export function hasMutation(slice) {
   if (WRITE_TOOL_RE.test(slice)) return true;
-  if (BASH_TOOL_RE.test(slice)) return MUTATING_VERB_RE.test(slice);
-  return false;
+  if (!BASH_TOOL_RE.test(slice)) return false;
+  const cmds = bashCommands(slice);
+  if (cmds === null) return true; // couldn't read the commands -> verify
+  return cmds.some((cmd) => cmd.split(/\|\||&&|[;&|\n]/).some(segmentMutates));
 }

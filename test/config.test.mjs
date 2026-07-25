@@ -302,3 +302,72 @@ test('research: off by default, on honored from project conf, junk rejected', ()
   assert.equal(r2.research, 'off');
   assert.ok(r2.notes.some((n) => n.includes('invalid research=yolo')));
 });
+
+// ---- security regressions ----
+
+// `pack` becomes a path segment in verifier.mjs. Unvalidated, a project conf
+// could point the verifier at a rule pack the builder wrote itself — the
+// verifier defeated by one config line, and NOT gated by the tamper lock.
+test('security: traversing pack= is rejected and falls back to default', () => {
+  const cwd = makeProject();
+  for (const evil of [
+    '../../../../tmp/evil-rules',
+    '..\\..\\evil',
+    '/etc/passwd',
+    'foo/bar',
+    '.',
+    '..',
+  ]) {
+    writeProjectConf(cwd, `pack=${evil}\n`);
+    const r = cfg.resolveConfig({ cwd, env: {} });
+    assert.equal(r.pack, 'default', `pack=${evil} must not be accepted`);
+    assert.equal(r.decidedBy.pack, 'default');
+    assert.ok(
+      r.notes.some((n) => n.includes('not a bare name')),
+      `pack=${evil} rejection must be noted`
+    );
+  }
+});
+
+test('security: ordinary pack names still work', () => {
+  const cwd = makeProject();
+  for (const ok of ['security', 'web-strict', 'team_pack', 'pack.v2', 'a']) {
+    writeProjectConf(cwd, `pack=${ok}\n`);
+    const r = cfg.resolveConfig({ cwd, env: {} });
+    assert.equal(r.pack, ok);
+    assert.equal(r.decidedBy.pack, 'project');
+  }
+});
+
+test('security: lock pins the rule pack against a project switch', () => {
+  writeGlobalConf('enabled=1\nlock=1\npack=strict\n');
+  const cwd = makeProject();
+  writeProjectConf(cwd, 'pack=lenient\n');
+  const r = cfg.resolveConfig({ cwd, env: {} });
+  assert.equal(r.pack, 'strict');
+  assert.equal(r.decidedBy.pack, 'global');
+  assert.ok(r.notes.some((n) => n.includes('project pack=lenient ignored: locked')));
+});
+
+// A project settings file can set env vars for hook processes, so an ungated
+// CROSSVERIFY=0 was a project-level way around the lock.
+test('security: lock gates CROSSVERIFY=0, and the disable is never silent', () => {
+  writeGlobalConf('enabled=1\nlock=1\n');
+  const cwd = makeProject();
+  const locked = cfg.resolveConfig({ cwd, env: { CROSSVERIFY: '0' } });
+  assert.equal(locked.enabled, true, 'locked config must ignore an env disable');
+  assert.ok(locked.notes.some((n) => n.includes('env CROSSVERIFY=0 ignored: locked')));
+
+  writeGlobalConf('enabled=1\n');
+  const unlocked = cfg.resolveConfig({ cwd, env: { CROSSVERIFY: '0' } });
+  assert.equal(unlocked.enabled, false, 'without the lock, env still disables');
+  assert.equal(unlocked.decidedBy.enabled, 'env');
+  assert.ok(unlocked.notes.some((n) => n.includes('env disable honored')));
+});
+
+test('security: CROSSVERIFY=force still overrides a locked config', () => {
+  writeGlobalConf('enabled=0\nlock=1\n');
+  const r = cfg.resolveConfig({ cwd: makeProject(), env: { CROSSVERIFY: 'force' } });
+  assert.equal(r.enabled, true);
+  assert.equal(r.mode, 'foreground');
+});

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildPrompt, runCodex, validateVerdict } from '../plugin/scripts/lib/codex.mjs';
+import { buildPrompt, runCodex, validateVerdict, resolveCodexCommand } from '../plugin/scripts/lib/codex.mjs';
 import { installFakeCodex, fakePathEntries } from './helpers/fake-codex.mjs';
 
 function makeTempDir() {
@@ -151,4 +151,48 @@ test('runCodex passes codexHome to the child as CODEX_HOME', async () => {
     assert.equal(res.ok, true);
     assert.equal(res.verdict.feedback, codexHome);
   });
+});
+
+// ---- security regressions ----
+
+// On Windows a `.cmd` shim can't be spawned with shell:false, so the argv
+// crosses cmd.exe — where &, |, (, ) are operators. Node quotes an argument
+// only when it contains a space, tab, or quote, so a space-free payload in
+// --model (CROSSVERIFY_MODEL) or --cd (the project path) EXECUTED. Confirmed
+// live on Windows 11 / Node 22 before the fix.
+test('resolveCodexCommand: exposes a verbatim flag matching the lane', () => {
+  const resolved = resolveCodexCommand();
+  assert.equal(typeof resolved.command, 'string');
+  assert.equal(typeof resolved.wrap, 'function');
+  if (process.platform !== 'win32') {
+    assert.equal(resolved.verbatim, false, 'POSIX never needs verbatim args');
+    assert.deepEqual(resolved.wrap(['exec', '--model', 'a&b']), ['exec', '--model', 'a&b']);
+  } else {
+    assert.equal(typeof resolved.verbatim, 'boolean');
+  }
+});
+
+test('resolveCodexCommand (win32 cmd lane): every argument is quoted, metacharacters inert', { skip: process.platform !== 'win32' ? 'win32 only' : false }, () => {
+  const resolved = resolveCodexCommand();
+  if (resolved.command.toLowerCase() !== 'cmd.exe') return; // .exe lane, no shell involved
+  const wrapped = resolved.wrap(['exec', '--model', 'gpt-5&whoami&rem', '--cd', 'C:\\proj a\\b']);
+  assert.deepEqual(wrapped.slice(0, 3), ['/d', '/s', '/c']);
+  const line = wrapped[3];
+  assert.equal(resolved.verbatim, true, 'Node must not re-quote what we quoted');
+  // /s strips the outermost quote pair, so the line needs one extra.
+  assert.ok(line.startsWith('""') || line.startsWith('"'), 'command line must be quote-wrapped');
+  assert.ok(line.endsWith('"'), 'command line must end quoted');
+  // No metacharacter may sit outside a quoted run.
+  assert.ok(
+    /"gpt-5&whoami&rem"/.test(line),
+    `payload must be quoted, got: ${line}`
+  );
+  assert.ok(/"C:\\proj a\\b"/.test(line), 'paths with spaces must survive');
+});
+
+test('runCodex: an argument containing a quote is refused, not shell-escaped', async (t) => {
+  if (process.platform !== 'win32') return; // only the cmd lane refuses
+  const resolved = resolveCodexCommand();
+  if (resolved.command.toLowerCase() !== 'cmd.exe') return;
+  assert.throws(() => resolved.wrap(['exec', '--model', 'a"b']), /refusing to pass an argument/);
 });

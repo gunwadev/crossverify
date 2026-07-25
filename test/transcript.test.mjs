@@ -147,24 +147,65 @@ const NON_MUTATING_COMMANDS = [
   'git status',
   'git diff',
   'echo hi',
-  // Word-boundary regression checks (I4): these contain a mutating verb as a
-  // SUBSTRING but must not match — the gate must not false-negative on
-  // prose, but it also must never false-positive on innocent words.
-  'delete this paragraph please', // "del" not followed by a space -> no match
-  'rename the model file', // "model" contains "del" preceded by a word char -> no match
+  // Read-only subcommands and flags of binaries that CAN write: the allowlist
+  // must not be so blunt that ordinary inspection triggers a verify every turn.
+  'git log --oneline -5',
+  'git show HEAD',
+  'npm test',
+  'node --version',
+  'rg pattern src',
+  'find . -name "*.js"',
+  'jq .a file.json',
+  // Chained read-only commands: every segment is checked, so a pipeline of
+  // safe commands stays safe.
+  'git status && ls',
+  'cat a.txt | grep foo',
 ];
 
-for (const command of MUTATING_COMMANDS) {
-  test(`mutating verb regex: "${command}" -> mutation`, () => {
+// Security regression (verifier bypass): the gate used to be a DENYLIST of
+// mutating verbs, so anything it didn't name escaped verification entirely —
+// a builder avoiding its own auditor only had to write files through an
+// interpreter. These all scored "no mutation" before the allowlist inversion.
+const PREVIOUSLY_MISSED_MUTATIONS = [
+  'node -e "require(\'fs\').writeFileSync(\'a.js\', x)"',
+  'python3 -c "open(\'a.py\',\'w\').write(y)"',
+  'perl -pi -e s/a/b/ file.txt',
+  'git checkout -- .',
+  'git restore .',
+  'install -m 755 src dst',
+  // hidden behind a leading env assignment and a read-only-looking first segment
+  'git status && node -e "process.exit(0)"',
+];
+
+for (const command of [...MUTATING_COMMANDS, ...PREVIOUSLY_MISSED_MUTATIONS]) {
+  test(`mutation gate: "${command}" -> mutation`, () => {
     assert.equal(hasMutation(sliceLastTurn(bashTurn(command))), true);
   });
 }
 
 for (const command of NON_MUTATING_COMMANDS) {
-  test(`mutating verb regex: "${command}" -> no mutation`, () => {
+  test(`mutation gate: "${command}" -> no mutation`, () => {
     assert.equal(hasMutation(sliceLastTurn(bashTurn(command))), false);
   });
 }
+
+// The gate is a cost optimization, so an unrecognized command must fall to the
+// safe side. These two used to be asserted as "no mutation" (they contain a
+// mutating verb only as a substring); under the allowlist they verify instead.
+// A needless verify is the documented acceptable trade — a silent skip is not.
+for (const command of ['delete this paragraph please', 'rename the model file']) {
+  test(`mutation gate: unrecognized command "${command}" errs toward verifying`, () => {
+    assert.equal(hasMutation(sliceLastTurn(bashTurn(command))), true);
+  });
+}
+
+test('mutation gate: unparseable Bash record errs toward verifying', () => {
+  const slice = [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'go' } }),
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash",', // truncated JSON
+  ].join('\n');
+  assert.equal(hasMutation(slice), true);
+});
 
 test('no genuine user line -> fallback scans whole text', () => {
   const fx = jsonl(

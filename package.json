@@ -4,6 +4,18 @@
   "description": "Cross-vendor verifier for Claude Code: a Stop hook launches Codex (read-only) to independently check the builder agent's last turn.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gunwadev/crossverify.git"
+  },
+  "homepage": "https://github.com/gunwadev/crossverify#readme",
+  "bugs": {
+    "url": "https://github.com/gunwadev/crossverify/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "engines": {
     "node": ">=18"
   },
