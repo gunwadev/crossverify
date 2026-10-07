@@ -406,17 +406,24 @@ test('second setup with a fake fireconnect writes the second codex home and enab
   const { home, cwd } = makeSandbox();
   const bin = mkdtempSync(path.join(tmpdir(), 'cv-fakefc-'));
   // Fake fireconnect: records argv, writes a config.toml at --config-path.
-  writeFileSync(path.join(bin, 'fireconnect'), [
-    '#!/usr/bin/env node',
+  // Same cross-platform shape as helpers/fake-codex.mjs: a shebang script on
+  // POSIX, a .cmd shim + .cjs impl on Windows (shebangs do not execute there).
+  const impl = [
     "const fs=require('node:fs');const a=process.argv.slice(2);",
     "fs.writeFileSync(process.env.FC_ARGS_OUT, JSON.stringify(a));",
     "const i=a.indexOf('--config-path');",
     "fs.writeFileSync(a[i+1], 'model_provider = \"fireworks-ai\"\\nmodel = \"firerouter\"\\n');",
-  ].join('\n'), { mode: 0o755 });
+  ].join('\n');
+  if (process.platform === 'win32') {
+    writeFileSync(path.join(bin, 'fireconnect-impl.cjs'), impl);
+    writeFileSync(path.join(bin, 'fireconnect.cmd'), ['@echo off', `"${process.execPath}" "%~dp0fireconnect-impl.cjs" %*`, 'exit /b %errorlevel%', ''].join('\r\n'));
+  } else {
+    writeFileSync(path.join(bin, 'fireconnect'), `#!/usr/bin/env node\n${impl}`, { mode: 0o755 });
+  }
   const argsOut = path.join(bin, 'args.json');
   const res = runCli(['second', 'setup'], {
     home, cwd,
-    extraEnv: { PATH: [bin, path.dirname(process.execPath), '/usr/bin', '/bin'].join(path.delimiter), FC_ARGS_OUT: argsOut },
+    extraEnv: { PATH: fakeCodex.fakePathEntries(bin).join(path.delimiter), FC_ARGS_OUT: argsOut },
   });
   assert.equal(res.status, 0, res.stdout + res.stderr);
   const secondHome = path.join(home, '.claude', 'crossverify', 'codex-home-second');

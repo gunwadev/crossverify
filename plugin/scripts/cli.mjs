@@ -155,6 +155,25 @@ function cmdResearch(sub) {
   process.exit(0);
 }
 
+// Windows: fireconnect on PATH is a .cmd shim, which spawn() with shell:false
+// cannot execute. Same resolution and quoting contract as lib/codex.mjs
+// resolveCodexCommand (see there for why every argument is quoted and the
+// outer quote pair is load-bearing under cmd.exe /s).
+function resolveFireconnect() {
+  if (process.platform !== 'win32') return { command: 'fireconnect', wrap: (a) => a, verbatim: false };
+  const where = spawnSync('where.exe', ['fireconnect'], {
+    encoding: 'utf8',
+    env: { ...process.env, PATHEXT: process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD' },
+  });
+  const candidates = (where.status === 0 ? where.stdout : '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const exe = candidates.find((c) => c.toLowerCase().endsWith('.exe'));
+  if (exe) return { command: exe, wrap: (a) => a, verbatim: false };
+  const cmd = candidates.find((c) => c.toLowerCase().endsWith('.cmd')) || candidates[0];
+  if (!cmd) return { command: 'fireconnect', wrap: (a) => a, verbatim: false };
+  const q = (s) => { if (String(s).includes('"')) throw new Error(`refusing to pass a quoted argument to cmd.exe: ${s}`); return `"${s}"`; };
+  return { command: 'cmd.exe', wrap: (a) => ['/d', '/s', '/c', `"${[cmd, ...a].map(q).join(' ')}"`], verbatim: true };
+}
+
 function secondHomePath() {
   return path.join(stateDir(), 'codex-home-second');
 }
@@ -168,7 +187,8 @@ function cmdSecondSetup() {
   const model = process.env.CROSSVERIFY_SECOND_MODEL && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(process.env.CROSSVERIFY_SECOND_MODEL)
     ? process.env.CROSSVERIFY_SECOND_MODEL
     : 'firerouter';
-  const probe = spawnSync('fireconnect', ['--version'], { encoding: 'utf8' });
+  const fc = resolveFireconnect();
+  const probe = spawnSync(fc.command, fc.wrap(['--version']), { encoding: 'utf8', windowsVerbatimArguments: fc.verbatim });
   if (probe.error || probe.status !== 0) {
     console.error('crossverify: fireconnect not found on PATH.');
     console.error('Install it (https://github.com/fw-ai/fireconnect), run `fireconnect login`, then re-run `crossverify second setup`.');
@@ -182,7 +202,7 @@ function cmdSecondSetup() {
   // separate file under our own state dir that the app never loads, so the
   // guard does not apply here.
   const args = ['codex', 'on', '--model', model, '--config-path', configPath, '--data-dir', path.join(home, 'fireconnect-state'), '--force'];
-  const res = spawnSync('fireconnect', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const res = spawnSync(fc.command, fc.wrap(args), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsVerbatimArguments: fc.verbatim });
   if (res.stdout) process.stdout.write(res.stdout);
   if (res.error || res.status !== 0 || !existsSync(configPath)) {
     if (res.stderr) process.stderr.write(res.stderr);
