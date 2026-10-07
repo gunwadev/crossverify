@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import * as fakeCodex from './helpers/fake-codex.mjs';
+const awaitImport = () => fakeCodex;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.join(__dirname, '..', 'plugin', 'scripts', 'cli.mjs');
 const STATUSLINE_PATH = path.join(__dirname, '..', 'plugin', 'scripts', 'statusline-segment.mjs');
@@ -368,4 +370,229 @@ test('crossverify research on/off writes project conf; junk arg exits 1', () => 
   assert.match(readFileSync(path.join(cwd, '.claude', 'crossverify.conf'), 'utf8'), /research=off/);
   res = runCli(['research', 'sideways'], { home, cwd });
   assert.equal(res.status, 1);
+});
+
+test('crossverify second on/off and gaps on/off write project conf; junk exits 1', () => {
+  const { home, cwd } = makeSandbox();
+  let res = runCli(['second', 'on'], { home, cwd });
+  assert.equal(res.status, 0);
+  assert.match(readFileSync(path.join(cwd, '.claude', 'crossverify.conf'), 'utf8'), /^second=on$/m);
+  res = runCli(['second', 'off'], { home, cwd });
+  assert.equal(res.status, 0);
+  res = runCli(['gaps', 'off'], { home, cwd });
+  assert.equal(res.status, 0);
+  assert.match(readFileSync(path.join(cwd, '.claude', 'crossverify.conf'), 'utf8'), /^gaps=off$/m);
+  assert.equal(runCli(['second', 'sideways'], { home, cwd }).status, 1);
+  assert.equal(runCli(['gaps', 'sideways'], { home, cwd }).status, 1);
+});
+
+test('status table lists second and gaps', () => {
+  const { home, cwd } = makeSandbox();
+  const res = runCli(['status'], { home, cwd });
+  assert.equal(res.status, 0);
+  assert.match(res.stdout, /^second +off +default$/m);
+  assert.match(res.stdout, /^gaps +on +default$/m);
+});
+
+test('second setup without fireconnect prints the install pointer and exits 1, writes nothing', () => {
+  const { home, cwd } = makeSandbox();
+  const res = runCli(['second', 'setup'], { home, cwd, extraEnv: { PATH: path.dirname(process.execPath) } });
+  assert.equal(res.status, 1);
+  assert.match(res.stdout + res.stderr, /fireconnect not found/);
+  assert.equal(existsSync(path.join(home, '.claude', 'crossverify', 'codex-home-second')), false);
+});
+
+test('second setup with a fake fireconnect writes the second codex home and enables second=on', () => {
+  const { home, cwd } = makeSandbox();
+  const bin = mkdtempSync(path.join(tmpdir(), 'cv-fakefc-'));
+  // Fake fireconnect: records argv, writes a config.toml at --config-path.
+  writeFileSync(path.join(bin, 'fireconnect'), [
+    '#!/usr/bin/env node',
+    "const fs=require('node:fs');const a=process.argv.slice(2);",
+    "fs.writeFileSync(process.env.FC_ARGS_OUT, JSON.stringify(a));",
+    "const i=a.indexOf('--config-path');",
+    "fs.writeFileSync(a[i+1], 'model_provider = \"fireworks-ai\"\\nmodel = \"firerouter\"\\n');",
+  ].join('\n'), { mode: 0o755 });
+  const argsOut = path.join(bin, 'args.json');
+  const res = runCli(['second', 'setup'], {
+    home, cwd,
+    extraEnv: { PATH: [bin, path.dirname(process.execPath), '/usr/bin', '/bin'].join(path.delimiter), FC_ARGS_OUT: argsOut },
+  });
+  assert.equal(res.status, 0, res.stdout + res.stderr);
+  const secondHome = path.join(home, '.claude', 'crossverify', 'codex-home-second');
+  assert.match(readFileSync(path.join(secondHome, 'config.toml'), 'utf8'), /firerouter/);
+  const args = JSON.parse(readFileSync(argsOut, 'utf8'));
+  assert.deepEqual(args.slice(0, 2), ['codex', 'on']);
+  assert.ok(args.includes('--model') && args[args.indexOf('--model') + 1] === 'firerouter');
+  assert.equal(args[args.indexOf('--config-path') + 1], path.join(secondHome, 'config.toml'));
+  // Our config lives outside ~/.codex, so the ChatGPT-app-running guard (which protects the shared config) does not apply.
+  assert.ok(args.includes('--force'));
+  assert.match(readFileSync(path.join(cwd, '.claude', 'crossverify.conf'), 'utf8'), /^second=on$/m);
+  assert.match(res.stdout, /second reviewer ready/);
+});
+
+test('crossverify report renders gaps and the second reviewer line', () => {
+  const { home, cwd } = makeSandbox();
+  const reportsDir = path.join(cwd, '.crossverify');
+  mkdirSync(reportsDir, { recursive: true });
+  writeFileSync(path.join(reportsDir, 'sess1-x.json'), JSON.stringify({
+    status: 'verified', claims_failed: 0, verified: [{ claim: 'a', evidence: 'ok' }],
+    gaps: [{ gap: 'no retry', classification: 'CONFIRMED', evidence: 'x.mjs:3', fix: 'add retry' }],
+    second: { model: 'firerouter', status: 'verified', agreed: true },
+  }));
+  const res = runCli(['report'], { home, cwd });
+  assert.equal(res.status, 0);
+  assert.match(res.stdout, /! CONFIRMED no retry/);
+  assert.match(res.stdout, /└ x\.mjs:3 · fix: add retry/);
+  assert.match(res.stdout, /second reviewer firerouter: verified \(agrees\)/);
+  assert.match(res.stdout, /1 gap/);
+});
+
+test('second now --transcript runs the verifier on demand and prints the report', () => {
+  const { home, cwd } = makeSandbox();
+  mkdirSync(path.join(cwd, '.git'));
+  const bin = mkdtempSync(path.join(tmpdir(), 'cv-fake-codex-'));
+  const secondHome = path.join(home, '.claude', 'crossverify', 'codex-home-second');
+  mkdirSync(secondHome, { recursive: true });
+  writeFileSync(path.join(secondHome, 'config.toml'), 'model = "firerouter"\n');
+  writeFileSync(path.join(bin, 'verdict.json'), JSON.stringify({
+    status: 'verified', confidence: 'VERIFIED', claims_total: 1, claims_verified: 1, claims_failed: 0, claims_unverified: 0,
+    verified: [{ claim: 'x', evidence: 'y' }], failed: [], could_not_verify: [], external_claims: [], feedback: '', needs_from_user: '',
+    gaps: [{ gap: 'g', classification: 'CONFIRMED', evidence: 'e', fix: 'f' }],
+  }));
+  // Same verdict for both homes is fine here: the point is that the second line appears.
+  const { installFakeCodex, fakePathEntries } = awaitImport();
+  installFakeCodex(bin);
+  const transcript = path.join(bin, 't.jsonl');
+  writeFileSync(transcript, JSON.stringify({ type: 'user', message: { role: 'user', content: 'q' } }) + '\n'
+    + JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'a' }] } }) + '\n');
+  const res = runCli(['second', 'now', '--transcript', transcript], {
+    home, cwd,
+    extraEnv: { PATH: fakePathEntries(bin).join(path.delimiter), FAKE_VERDICT_FILE: path.join(bin, 'verdict.json'), CROSSVERIFY: '1' },
+  });
+  assert.equal(res.status, 0, res.stdout + res.stderr);
+  assert.match(res.stdout, /crossverify · VERIFIED/);
+  assert.match(res.stdout, /second reviewer firerouter: verified \(agrees\)/);
+  assert.match(res.stdout, /! CONFIRMED g/);
+});
+
+test('second now without a second codex home explains setup and exits 1', () => {
+  const { home, cwd } = makeSandbox();
+  const res = runCli(['second', 'now', '--transcript', path.join(cwd, 'nope.jsonl')], { home, cwd });
+  assert.equal(res.status, 1);
+  assert.match(res.stdout + res.stderr, /crossverify second setup/);
+});
+
+test('second now with no transcript found explains where it looked and exits 1', () => {
+  const { home, cwd } = makeSandbox();
+  const secondHome = path.join(home, '.claude', 'crossverify', 'codex-home-second');
+  mkdirSync(secondHome, { recursive: true });
+  writeFileSync(path.join(secondHome, 'config.toml'), 'model = "firerouter"\n');
+  const res = runCli(['second', 'now'], { home, cwd });
+  assert.equal(res.status, 1);
+  assert.match(res.stdout + res.stderr, /no transcript found/i);
+  assert.match(res.stdout + res.stderr, /\.claude[\\/]projects/);
+});
+
+// ---- crossverify second check: is Fireworks actually usable right now? ----
+import { createServer } from 'node:http';
+
+function withFireworksMock(handler, fn) {
+  return new Promise((resolve, reject) => {
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => handler(req, res, body));
+    });
+    server.listen(0, '127.0.0.1', async () => {
+      try { resolve(await fn(`http://127.0.0.1:${server.address().port}/inference/v1`)); }
+      catch (e) { reject(e); }
+      finally { server.close(); }
+    });
+  });
+}
+
+// spawnSync would block the event loop the mock server lives on, so the CLI
+// could never get an answer; run it async for these tests.
+import { spawn } from 'node:child_process';
+function runCliAsync(args, { home, cwd }) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [CLI_PATH, ...args], { cwd, env: baseEnv(home), stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = ''; let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+function secondHomeWith(home, baseUrl, model = 'firerouter') {
+  const dir = path.join(home, '.claude', 'crossverify', 'codex-home-second');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, 'config.toml'), [
+    'model_provider = "fireworks-ai"', `model = "${model}"`, '',
+    '[model_providers.fireworks-ai]', 'name = "Fireworks"', `base_url = "${baseUrl}"`,
+    'wire_api = "responses"', 'experimental_bearer_token = "fw_testkey_000000000000"', '',
+  ].join('\n'));
+}
+
+test('second check: 200 reports OK with the served model and exits 0', async () => {
+  const { home, cwd } = makeSandbox();
+  let seen = null;
+  await withFireworksMock((req, res, body) => {
+    seen = { url: req.url, auth: req.headers.authorization, body: JSON.parse(body) };
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ model: 'glm-5p3-flash', choices: [{ message: { content: 'ok' } }] }));
+  }, async (base) => {
+    secondHomeWith(home, base);
+    const res = await runCliAsync(['second', 'check'], { home, cwd });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /Fireworks: OK/);
+    assert.match(res.stdout, /firerouter.*served by glm-5p3-flash/);
+    assert.equal(seen.url, '/inference/v1/chat/completions');
+    assert.equal(seen.auth, 'Bearer fw_testkey_000000000000');
+    assert.equal(seen.body.max_tokens, 1);
+    assert.doesNotMatch(res.stdout, /fw_testkey/, 'never print the key');
+  });
+});
+
+test('second check: 412 reports account suspended with the billing link, exits 2', async () => {
+  const { home, cwd } = makeSandbox();
+  await withFireworksMock((req, res) => {
+    res.writeHead(412, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Account x is suspended, possibly due to reaching the monthly spending limit. Please go to https://fireworks.ai/account/billing' } }));
+  }, async (base) => {
+    secondHomeWith(home, base);
+    const res = await runCliAsync(['second', 'check'], { home, cwd });
+    assert.equal(res.status, 2);
+    assert.match(res.stdout, /Fireworks: SUSPENDED/);
+    assert.match(res.stdout, /fireworks\.ai\/account\/billing/);
+  });
+});
+
+test('second check: 429 reports rate limited with retry-after, exits 2', async () => {
+  const { home, cwd } = makeSandbox();
+  await withFireworksMock((req, res) => {
+    res.writeHead(429, { 'retry-after': '56' });
+    res.end('{"error":{"message":"rate limit"}}');
+  }, async (base) => {
+    secondHomeWith(home, base);
+    const res = await runCliAsync(['second', 'check'], { home, cwd });
+    assert.equal(res.status, 2);
+    assert.match(res.stdout, /Fireworks: RATE LIMITED/);
+    assert.match(res.stdout, /retry in 56s/);
+  });
+});
+
+test('second check: 401 reports bad key, exits 2; no setup reports not configured, exits 1', async () => {
+  const { home, cwd } = makeSandbox();
+  const none = runCli(['second', 'check'], { home, cwd });
+  assert.equal(none.status, 1);
+  assert.match(none.stdout + none.stderr, /not configured.*crossverify second setup/);
+  await withFireworksMock((req, res) => { res.writeHead(401); res.end(''); }, async (base) => {
+    secondHomeWith(home, base);
+    const res = await runCliAsync(['second', 'check'], { home, cwd });
+    assert.equal(res.status, 2);
+    assert.match(res.stdout, /Fireworks: KEY REJECTED/);
+    assert.match(res.stdout, /fireconnect login/);
+  });
 });

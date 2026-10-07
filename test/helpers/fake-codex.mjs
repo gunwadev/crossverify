@@ -19,7 +19,7 @@ import path from 'node:path';
 
 const IS_WIN = process.platform === 'win32';
 
-function implSource({ payload, delayMs, echoStdin }) {
+function implSource({ payload, delayMs, echoStdin, routeByHome }) {
   return [
     "const fs = require('node:fs');",
     'const args = process.argv.slice(2);',
@@ -33,8 +33,13 @@ function implSource({ payload, delayMs, echoStdin }) {
         : "let body = process.env.FAKE_VERDICT_FILE && fs.existsSync(process.env.FAKE_VERDICT_FILE) ? fs.readFileSync(process.env.FAKE_VERDICT_FILE, 'utf8') : '';",
     // JSON-escape the substitution: on Windows CODEX_HOME contains backslashes,
     // which would corrupt a JSON payload if spliced in raw.
+    // routeByHome: { [codexHome]: verdictFile } — serve a different verdict
+    // when CODEX_HOME matches (the second reviewer runs with its own home).
+    `const routes = ${JSON.stringify(routeByHome || {})};`,
+    "if (process.env.CODEX_HOME && routes[process.env.CODEX_HOME]) body = fs.readFileSync(routes[process.env.CODEX_HOME], 'utf8');",
     "body = body.replace('__CODEX_HOME__', JSON.stringify(process.env.CODEX_HOME || 'unset').slice(1, -1));",
-    'const code = Number(process.env.FAKE_CODEX_EXIT || 0);',
+    // FAKE_CODEX_EXIT_FOR_HOME: fail only the run whose CODEX_HOME matches.
+    "const code = (process.env.FAKE_CODEX_EXIT_FOR_HOME && process.env.FAKE_CODEX_EXIT_FOR_HOME === (process.env.CODEX_HOME || '__unset__')) ? 1 : Number(process.env.FAKE_CODEX_EXIT || 0);",
     `setTimeout(() => { if (out && body !== '') fs.writeFileSync(out, body); process.exit(code); }, ${delayMs});`,
     '',
   ].join('\n');
@@ -42,15 +47,15 @@ function implSource({ payload, delayMs, echoStdin }) {
 
 // Writes the fake into dir. payload === undefined -> env mode.
 // echoStdin: true -> the fake writes its stdin (the prompt) as the verdict.
-export function installFakeCodex(dir, { payload, delayMs = 0, echoStdin = false } = {}) {
+export function installFakeCodex(dir, { payload, delayMs = 0, echoStdin = false, routeByHome } = {}) {
   if (IS_WIN) {
     const impl = path.join(dir, 'codex-impl.cjs');
-    fs.writeFileSync(impl, implSource({ payload, delayMs, echoStdin }));
+    fs.writeFileSync(impl, implSource({ payload, delayMs, echoStdin, routeByHome }));
     // %errorlevel% propagation: node is the last command; exit /b forwards it.
     const shim = ['@echo off', `"${process.execPath}" "%~dp0codex-impl.cjs" %*`, 'exit /b %errorlevel%', ''].join('\r\n');
     fs.writeFileSync(path.join(dir, 'codex.cmd'), shim);
   } else {
-    const script = '#!/usr/bin/env node\n' + implSource({ payload, delayMs, echoStdin });
+    const script = '#!/usr/bin/env node\n' + implSource({ payload, delayMs, echoStdin, routeByHome });
     fs.writeFileSync(path.join(dir, 'codex'), script, { mode: 0o755 });
   }
 }

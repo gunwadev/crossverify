@@ -38,6 +38,8 @@ const DEFAULTS = {
   research: 'off',
   lock: false,
   failmode: 'open',
+  second: 'off',
+  gaps: 'on',
 };
 
 const ENUMS = {
@@ -45,6 +47,8 @@ const ENUMS = {
   output: ['project', 'global'],
   research: ['off', 'on'],
   failmode: ['open', 'closed'],
+  second: ['off', 'on'],
+  gaps: ['off', 'on'],
 };
 
 // Keys whose value is a bare NAME, not free text. `pack` becomes a path
@@ -122,8 +126,12 @@ export function resolveConfig({ cwd = process.cwd(), env = process.env } = {}) {
       notes.push(`project pack=${raw} ignored: locked`);
       continue;
     }
+    // second (independent reviewer) and gaps (gap analysis) are coverage:
+    // turning either off at project level is a downgrade the lock gates too.
     const isDowngrade = (key === 'mode' && raw === 'background' && config.mode === 'foreground')
-      || (key === 'failmode' && raw === 'open' && config.failmode === 'closed');
+      || (key === 'failmode' && raw === 'open' && config.failmode === 'closed')
+      || (key === 'second' && raw === 'off' && config.second === 'on')
+      || (key === 'gaps' && raw === 'off' && config.gaps === 'on');
     if (isDowngrade) {
       if (config.lock) {
         notes.push(`project ${key}=${raw} downgrade ignored: locked`);
@@ -166,6 +174,26 @@ export function resolveConfig({ cwd = process.cwd(), env = process.env } = {}) {
     } else {
       notes.push(`unknown env value ${envRaw} ignored`);
     }
+  }
+
+  // Layer: env, second reviewer. CROSSVERIFY_SECOND=1 runs the second
+  // reviewer for this run only (the on-demand switch for sessions that get
+  // rate-limited when it runs on every Stop). =0 is a disable and the lock
+  // gates it like every other env disable.
+  const envSecond = env.CROSSVERIFY_SECOND;
+  if (envSecond === '1') {
+    config.second = 'on';
+    decidedBy.second = 'env';
+  } else if (envSecond === '0') {
+    if (config.lock && config.second === 'on') {
+      notes.push('env CROSSVERIFY_SECOND=0 ignored: locked');
+    } else {
+      config.second = 'off';
+      decidedBy.second = 'env';
+      notes.push('env second disable honored (lock off)');
+    }
+  } else if (envSecond !== undefined && envSecond !== '') {
+    notes.push(`unknown env value CROSSVERIFY_SECOND=${envSecond} ignored`);
   }
 
   return { ...config, decidedBy, notes };

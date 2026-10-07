@@ -43,13 +43,17 @@ test('what-this-touches / how-to-undo section exists with the undo guarantees', 
   assert.match(readme, /Default off/);
 });
 
-test('config reference: all 7 keys, precedence chain, env vars', () => {
-  for (const key of ['enabled', 'mode', 'output', 'pack', 'research', 'lock', 'failmode']) {
+test('config reference: all 9 keys, precedence chain, env vars', () => {
+  for (const key of ['enabled', 'mode', 'output', 'pack', 'research', 'second', 'gaps', 'lock', 'failmode']) {
     assert.match(readme, new RegExp('`' + key + '`'), `key ${key} documented`);
   }
   assert.match(readme, /env > project conf > global conf > default/);
   assert.match(readme, /CROSSVERIFY/);
   assert.match(readme, /CROSSVERIFY_MODEL/);
+  assert.match(readme, /CROSSVERIFY_SECOND_MODEL/);
+  assert.match(readme, /CROSSVERIFY_SECOND=1/);
+  assert.match(readme, /### Second reviewer/);
+  assert.match(readme, /### Gap analysis/);
 });
 
 test('tamper lock and fail-open are explained', () => {

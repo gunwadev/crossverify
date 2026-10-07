@@ -77,6 +77,8 @@ test('resolveConfig: everything defaults, default OFF', () => {
     research: 'default',
     lock: 'default',
     failmode: 'default',
+    second: 'default',
+    gaps: 'default',
   });
   assert.deepEqual(r.notes, []);
 });
@@ -370,4 +372,56 @@ test('security: CROSSVERIFY=force still overrides a locked config', () => {
   const r = cfg.resolveConfig({ cwd: makeProject(), env: { CROSSVERIFY: 'force' } });
   assert.equal(r.enabled, true);
   assert.equal(r.mode, 'foreground');
+});
+
+// ---- second reviewer + gap analysis keys ----
+
+test('second reviewer: off by default, on honored, junk rejected', () => {
+  const cwd = makeProject();
+  const d = cfg.resolveConfig({ cwd, env: {} });
+  assert.equal(d.second, 'off');
+  assert.equal(d.decidedBy.second, 'default');
+  writeProjectConf(cwd, 'second=on\n');
+  const r = cfg.resolveConfig({ cwd, env: {} });
+  assert.equal(r.second, 'on');
+  assert.equal(r.decidedBy.second, 'project');
+  writeProjectConf(cwd, 'second=maybe\n');
+  const r2 = cfg.resolveConfig({ cwd, env: {} });
+  assert.equal(r2.second, 'off');
+  assert.ok(r2.notes.some((n) => n.includes('invalid second=maybe')));
+});
+
+test('gaps: on by default, off honored from project conf', () => {
+  const cwd = makeProject();
+  assert.equal(cfg.resolveConfig({ cwd, env: {} }).gaps, 'on');
+  writeProjectConf(cwd, 'gaps=off\n');
+  const r = cfg.resolveConfig({ cwd, env: {} });
+  assert.equal(r.gaps, 'off');
+  assert.equal(r.decidedBy.gaps, 'project');
+});
+
+test('lock gates project downgrades of second and gaps (on -> off)', () => {
+  writeGlobalConf('enabled=1\nsecond=on\ngaps=on\nlock=1\n');
+  const cwd = makeProject();
+  writeProjectConf(cwd, 'second=off\ngaps=off\n');
+  const r = cfg.resolveConfig({ cwd, env: {} });
+  assert.equal(r.second, 'on');
+  assert.equal(r.gaps, 'on');
+  assert.ok(r.notes.includes('project second=off downgrade ignored: locked'));
+  assert.ok(r.notes.includes('project gaps=off downgrade ignored: locked'));
+});
+
+test('CROSSVERIFY_SECOND=1 turns the second reviewer on for this run; =0 is ignored under lock', () => {
+  const cwd = makeProject();
+  const on = cfg.resolveConfig({ cwd, env: { CROSSVERIFY_SECOND: '1' } });
+  assert.equal(on.second, 'on');
+  assert.equal(on.decidedBy.second, 'env');
+  writeGlobalConf('second=on\n');
+  const off = cfg.resolveConfig({ cwd, env: { CROSSVERIFY_SECOND: '0' } });
+  assert.equal(off.second, 'off');
+  assert.ok(off.notes.some((n) => n.includes('env second disable honored')));
+  writeGlobalConf('second=on\nlock=1\n');
+  const locked = cfg.resolveConfig({ cwd, env: { CROSSVERIFY_SECOND: '0' } });
+  assert.equal(locked.second, 'on');
+  assert.ok(locked.notes.some((n) => n.includes('env CROSSVERIFY_SECOND=0 ignored: locked')));
 });

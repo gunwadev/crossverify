@@ -196,3 +196,20 @@ test('runCodex: an argument containing a quote is refused, not shell-escaped', a
   if (resolved.command.toLowerCase() !== 'cmd.exe') return;
   assert.throws(() => resolved.wrap(['exec', '--model', 'a"b']), /refusing to pass an argument/);
 });
+
+test('buildPrompt carries GAPS and the gap-analysis section is in the system prompt', async () => {
+  const prompt = buildPrompt({
+    systemPromptText: 'S', cwd: '/p', transcriptPath: '/t', rulesPath: '/r',
+    attempt: 1, maxAttempts: 2, research: 'off', gaps: 'on',
+  });
+  assert.ok(prompt.includes('GAPS: on\n'));
+  const fs = await import('node:fs');
+  const sys = fs.readFileSync(new URL('../plugin/verifier/system-prompt.md', import.meta.url), 'utf8');
+  assert.match(sys, /## Gap analysis/);
+  assert.match(sys, /CONFIRMED/);
+  assert.match(sys, /OPEN_QUESTION/);
+  const schema = JSON.parse(fs.readFileSync(new URL('../plugin/verifier/output-schema.json', import.meta.url), 'utf8'));
+  assert.ok(schema.properties.gaps, 'schema must declare gaps');
+  assert.ok(schema.required.includes('gaps'));
+  assert.deepEqual(schema.properties.gaps.items.properties.classification.enum, ['CONFIRMED', 'OPEN_QUESTION']);
+});

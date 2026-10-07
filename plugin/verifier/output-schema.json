@@ -15,7 +15,8 @@
     "could_not_verify",
     "external_claims",
     "feedback",
-    "needs_from_user"
+    "needs_from_user",
+    "gaps"
   ],
   "properties": {
     "status": {
@@ -132,6 +133,43 @@
     "needs_from_user": {
       "type": "string",
       "description": "What the engineer should add to the verifier (rule, tool, fixture, oracle) to make the next run more complete. Empty when nothing's needed."
+    },
+    "gaps": {
+      "type": "array",
+      "maxItems": 10,
+      "description": "Gap analysis: things the turn left missing or fragile that the builder did not claim. Advisory only; never changes status. Each entry must cite evidence. Empty when GAPS is off.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "gap",
+          "classification",
+          "evidence",
+          "fix"
+        ],
+        "properties": {
+          "gap": {
+            "type": "string",
+            "description": "One sentence naming the missing or fragile thing."
+          },
+          "classification": {
+            "type": "string",
+            "enum": [
+              "CONFIRMED",
+              "OPEN_QUESTION"
+            ],
+            "description": "CONFIRMED: you read the source and cite it. OPEN_QUESTION: could not check read-only; evidence names the check that would settle it."
+          },
+          "evidence": {
+            "type": "string",
+            "description": "file:line, or 'checked <file>, section absent', or the exact check needed."
+          },
+          "fix": {
+            "type": "string",
+            "description": "Cheapest concrete fix."
+          }
+        }
+      }
     }
   }
 }

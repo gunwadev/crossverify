@@ -27,6 +27,10 @@ const REQUIRED_BODY_HEADINGS = [
   '## File locations',
   '## Anti-instructions',
   '## Lock',
+  '## Two reviewers',
+  '### How to invoke the second reviewer',
+  '### Which vendor decides',
+  '## Gap analysis',
 ];
 
 const REQUIRED_REPORT_FIELDS = [
@@ -38,6 +42,8 @@ const REQUIRED_REPORT_FIELDS = [
   'claims_unverified',
   'feedback',
   'needs_from_user',
+  'gaps',
+  'second',
 ];
 
 function parseFrontmatter(text) {
@@ -104,4 +110,23 @@ test('docs/claude-md-snippet.md mentions crossverify and a CLI invocation', () =
     text.includes('crossverify status') || text.includes('crossverify report'),
     'snippet must show at least one crossverify CLI invocation'
   );
+});
+
+test('SKILL.md teaches the availability playbook and on-demand invocation', () => {
+  const text = readFileSync(skillPath, 'utf8').replace(/\r\n/g, '\n');
+  for (const needle of [
+    'crossverify second now',
+    'crossverify second check',
+    'CROSSVERIFY_SECOND=1',
+    'CROSSVERIFY_SECOND_MODEL',
+    'second.promoted',
+    'primary_error',
+    'second.status: "error"',
+    'both reviewers failed',
+    'hollow',
+    'hook.log',
+    'rate-limited',
+  ]) {
+    assert.ok(text.includes(needle), `SKILL.md missing: ${needle}`);
+  }
 });

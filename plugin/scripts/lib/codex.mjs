@@ -94,7 +94,7 @@ export function probeCodex() {
   return !probe.error && probe.status === 0;
 }
 
-export function buildPrompt({ systemPromptText, cwd, transcriptPath, rulesPath, attempt, maxAttempts, research }) {
+export function buildPrompt({ systemPromptText, cwd, transcriptPath, rulesPath, attempt, maxAttempts, research, gaps = 'on' }) {
   return [
     systemPromptText,
     '',
@@ -105,6 +105,7 @@ export function buildPrompt({ systemPromptText, cwd, transcriptPath, rulesPath, 
     `RULES: ${rulesPath}`,
     `ATTEMPT: ${attempt} of ${maxAttempts}`,
     `RESEARCH: ${research}`,
+    `GAPS: ${gaps}`,
     '',
     "Read the rules file. Read the transcript. Verify the builder's work. Output JSON only, matching the schema.",
   ].join('\n');

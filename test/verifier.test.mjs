@@ -104,7 +104,7 @@ function makeSandbox(t, { transcript = MUTATION_TRANSCRIPT, verdict = VERIFIED_V
     PATH: fakePathEntries(bin, { withCodex }).join(path.delimiter),
     FAKE_VERDICT_FILE: verdictFile,
   };
-  return { root, home, state, cwd, bin, transcriptPath, env };
+  return { root, home, state, cwd, bin, transcriptPath, env, verdictFile };
 }
 
 function runHook(sb, { session = 'sess1', hook = {}, env = {} } = {}) {
@@ -700,4 +700,204 @@ test('security: .gitignore entry is added when git init happens after the first 
   assert.equal(runHook(sb, { session: 'sess2' }).status, 0);
   assert.match(fs.readFileSync(path.join(sb.cwd, '.gitignore'), 'utf8'), /^\.crossverify\/$/m);
   await waitForReports(sb, 2);
+});
+
+
+// ---- second reviewer (different provider) ----
+
+const SECOND_FAILED = {
+  ...FAILED_VERDICT,
+  failed: [{ claim: 'second: a.txt has content hi', evidence: 'second: file empty' }],
+  feedback: 'second reviewer: a.txt is empty, write hi into it',
+  gaps: [{ gap: 'no test covers a.txt', classification: 'CONFIRMED', evidence: 'checked test/, no a.txt test', fix: 'add one' }],
+};
+
+// The fake codex serves verdict B when CODEX_HOME points at the second
+// reviewer's home (it substitutes __CODEX_HOME__ into the payload, so a payload
+// that embeds it lets the test tell the two runs apart).
+function makeSecondSandbox(t, { primary, second }) {
+  const sb = makeSandbox(t, { verdict: primary });
+  const secondHome = path.join(sb.state, 'codex-home-second');
+  fs.mkdirSync(secondHome, { recursive: true });
+  fs.writeFileSync(path.join(secondHome, 'config.toml'), 'model_provider = "fireworks-ai"\n');
+  const secondFile = path.join(sb.root, 'verdict-second.json');
+  fs.writeFileSync(secondFile, JSON.stringify(second));
+  // Re-install the fake in "route by CODEX_HOME" mode.
+  installFakeCodex(sb.bin, { routeByHome: { [secondHome]: secondFile } });
+  fs.mkdirSync(path.join(sb.cwd, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(sb.cwd, '.claude', 'crossverify.conf'), 'second=on\n');
+  return { ...sb, secondHome };
+}
+
+test('second=on: foreground run launches a second codex with its own CODEX_HOME and records it in the report', (t) => {
+  const sb = makeSecondSandbox(t, { primary: VERIFIED_VERDICT, second: VERIFIED_VERDICT });
+  const res = runHook(sb, { env: { CROSSVERIFY: 'foreground' } });
+  assert.equal(res.status, 0);
+  assert.equal(res.stdout, '');
+  const log = readLog(sb);
+  assert.match(log, /second reviewer launched model=firerouter/);
+  const [file] = reportFiles(sb);
+  const report = JSON.parse(fs.readFileSync(path.join(sb.cwd, '.crossverify', file), 'utf8'));
+  assert.equal(report.status, 'verified');
+  assert.equal(report.second.model, 'firerouter');
+  assert.equal(report.second.agreed, true);
+});
+
+test('second=on: second reviewer failing a verified primary becomes unsure, no block, disagreement recorded', (t) => {
+  const sb = makeSecondSandbox(t, { primary: VERIFIED_VERDICT, second: SECOND_FAILED });
+  const res = runHook(sb, { env: { CROSSVERIFY: 'foreground' } });
+  assert.equal(res.status, 0);
+  assert.equal(res.stdout, '', 'a lone second-reviewer failure must not block');
+  const [file] = reportFiles(sb);
+  const report = JSON.parse(fs.readFileSync(path.join(sb.cwd, '.crossverify', file), 'utf8'));
+  assert.equal(report.status, 'unsure');
+  assert.match(report.needs_from_user, /Reviewers disagree/);
+  assert.equal(report.gaps.length, 1, 'gaps from the second reviewer are kept');
+});
+
+test('second=on: both reviewers failing blocks with both feedbacks and lists gaps', (t) => {
+  const sb = makeSecondSandbox(t, { primary: { ...FAILED_VERDICT, gaps: [] }, second: SECOND_FAILED });
+  const res = runHook(sb, { env: { CROSSVERIFY: 'foreground' } });
+  assert.equal(res.status, 0);
+  const out = JSON.parse(res.stdout);
+  assert.equal(out.decision, 'block');
+  assert.ok(out.reason.includes(FAILED_VERDICT.feedback));
+  assert.match(out.reason, /Gaps \(advisory, do not block\):/);
+  assert.match(out.reason, /CONFIRMED.*no test covers a\.txt/);
+});
+
+test('second=on: second codex failure is fail-open, primary verdict stands, error recorded', (t) => {
+  const sb = makeSecondSandbox(t, { primary: VERIFIED_VERDICT, second: VERIFIED_VERDICT });
+  const res = runHook(sb, { env: { CROSSVERIFY: 'foreground', FAKE_CODEX_EXIT_FOR_HOME: sb.secondHome } });
+  assert.equal(res.status, 0);
+  assert.equal(res.stdout, '');
+  const [file] = reportFiles(sb);
+  const report = JSON.parse(fs.readFileSync(path.join(sb.cwd, '.crossverify', file), 'utf8'));
+  assert.equal(report.status, 'verified');
+  assert.equal(report.second.status, 'error');
+  assert.match(readLog(sb), /second reviewer failed open/);
+});
+
+test('second=on without a second codex home: logs a skip with the setup hint, primary still runs', (t) => {
+  const sb = makeSandbox(t, { verdict: VERIFIED_VERDICT });
+  fs.mkdirSync(path.join(sb.cwd, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(sb.cwd, '.claude', 'crossverify.conf'), 'second=on\n');
+  const res = runHook(sb, { env: { CROSSVERIFY: 'foreground' } });
+  assert.equal(res.status, 0);
+  assert.match(readLog(sb), /second reviewer skipped: no codex home at .*codex-home-second.*crossverify second setup/);
+  assert.equal(reportFiles(sb).length, 1);
+});
+
+test('second=on: background mode runs both reviewers in the detached child', async (t) => {
+  const sb = makeSecondSandbox(t, { primary: VERIFIED_VERDICT, second: VERIFIED_VERDICT });
+  const res = runHook(sb);
+  assert.equal(res.status, 0);
+  const [file] = await waitForReports(sb);
+  const report = JSON.parse(fs.readFileSync(path.join(sb.cwd, '.crossverify', file), 'utf8'));
+  assert.equal(report.second.model, 'firerouter');
+});
+
+test('gaps=off is passed to the verifier prompt as GAPS: off', (t) => {
+  const sb = makeSandbox(t, { verdict: VERIFIED_VERDICT });
+  installFakeCodex(sb.bin, { echoStdin: true });
+  fs.mkdirSync(path.join(sb.cwd, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(sb.cwd, '.claude', 'crossverify.conf'), 'gaps=off\n');
+  const res = runHook(sb, { env: { CROSSVERIFY: 'foreground' } });
+  assert.equal(res.status, 0);
+  // echo mode returns the prompt as "verdict": not valid JSON -> archived raw.
+  const dir = path.join(sb.cwd, '.crossverify');
+  const raw = fs.readdirSync(dir).find((f) => f.endsWith('.raw.txt'));
+  assert.ok(raw, 'prompt must be archived as raw output');
+  assert.match(fs.readFileSync(path.join(dir, raw), 'utf8'), /GAPS: off/);
+});
+
+test('formatBlockMessage lists gaps after the failed claims, advisory and capped', () => {
+  const msg = formatBlockMessage({
+    status: 'failed', claims_failed: 1, failed: [{ claim: 'x', evidence: 'y' }], feedback: 'fix x',
+    gaps: [{ gap: 'g1', classification: 'CONFIRMED', evidence: 'f:1', fix: 'do a' }],
+  }, 1, 2);
+  const lines = msg.split('\n');
+  const gi = lines.indexOf('Gaps (advisory, do not block):');
+  assert.ok(gi > lines.indexOf('Failed claims:'));
+  assert.equal(lines[gi + 1], '  ! CONFIRMED g1 — f:1 — fix: do a');
+  assert.ok(gi < lines.indexOf('--- begin verifier output (untrusted) ---'));
+});
+
+// ---- on-demand run (`crossverify second now`) ----
+// --on-demand: the user asked for this run explicitly, so the cost gates
+// (mutation gate, attempt counter) are bypassed, the second reviewer runs
+// even when second=off, nothing is ever written to stdout (no block), and the
+// attempt counter is left alone.
+
+function runOnDemand(sb, { session = 'sess-od', env = {} } = {}) {
+  const input = JSON.stringify({ session_id: session, transcript_path: sb.transcriptPath, stop_hook_active: false, cwd: sb.cwd });
+  const merged = { ...sb.env, ...env };
+  for (const k of Object.keys(merged)) if (merged[k] === undefined) delete merged[k];
+  return spawnSync(process.execPath, [VERIFIER, '--on-demand'], { input, env: merged, cwd: sb.root, encoding: 'utf8', timeout: 30_000 });
+}
+
+test('on-demand: runs the second reviewer with second=off, verifies a no-mutation turn, never blocks', (t) => {
+  const sb = makeSecondSandbox(t, { primary: { ...FAILED_VERDICT, gaps: [] }, second: SECOND_FAILED });
+  fs.writeFileSync(path.join(sb.cwd, '.claude', 'crossverify.conf'), 'second=off\n');
+  fs.writeFileSync(sb.transcriptPath, NO_MUTATION_TRANSCRIPT);
+  fs.writeFileSync(path.join(sb.state, 'sess-od.count'), '2'); // at MAX_ATTEMPTS: hook would skip
+  const res = runOnDemand(sb);
+  assert.equal(res.status, 0);
+  assert.equal(res.stdout, '', 'on-demand never emits a block decision');
+  const log = readLog(sb);
+  assert.match(log, /on-demand run: gates bypassed/);
+  assert.match(log, /second reviewer launched model=firerouter/);
+  const [file] = reportFiles(sb);
+  const report = JSON.parse(fs.readFileSync(path.join(sb.cwd, '.crossverify', file), 'utf8'));
+  assert.equal(report.status, 'failed');
+  assert.equal(report.second.model, 'firerouter');
+  assert.equal(report.on_demand, true);
+  assert.equal(fs.readFileSync(path.join(sb.state, 'sess-od.count'), 'utf8'), '2', 'counter untouched');
+});
+
+test('on-demand: still honors enabled=0 via the normal gate', (t) => {
+  const sb = makeSandbox(t, { verdict: VERIFIED_VERDICT });
+  const res = runOnDemand(sb, { env: { CROSSVERIFY: undefined } });
+  assert.equal(res.status, 0);
+  assert.match(readLog(sb), /skip: disabled/);
+  assert.equal(reportFiles(sb).length, 0);
+});
+
+test('second reviewer verdict stands alone when the primary codex fails (recorded as primary_error)', (t) => {
+  const sb = makeSecondSandbox(t, { primary: VERIFIED_VERDICT, second: SECOND_FAILED });
+  // Fail only the PRIMARY run (its CODEX_HOME is the default codex-home, which
+  // does not exist in the sandbox, so the fake sees CODEX_HOME unset).
+  const res = runOnDemand(sb, { env: { FAKE_CODEX_EXIT_FOR_HOME: '__unset__' } });
+  assert.equal(res.status, 0);
+  const [file] = reportFiles(sb);
+  const report = JSON.parse(fs.readFileSync(path.join(sb.cwd, '.crossverify', file), 'utf8'));
+  assert.equal(report.status, 'failed', 'second verdict promoted');
+  assert.equal(report.second.model, 'firerouter');
+  assert.equal(report.second.promoted, true);
+  assert.match(report.primary_error, /exited with code 1/);
+  assert.match(readLog(sb), /primary failed .* second reviewer verdict promoted/);
+});
+
+test('hollow second verdict (unsure, zero claims, turn had mutations) is annotated and never promoted over nothing silently', (t) => {
+  const hollow = { ...VERIFIED_VERDICT, status: 'unsure', confidence: 'FAILED', claims_total: 0, claims_verified: 0, verified: [], needs_from_user: 'Placeholder' };
+  const sb = makeSecondSandbox(t, { primary: VERIFIED_VERDICT, second: hollow });
+  const res = runOnDemand(sb, { env: { FAKE_CODEX_EXIT_FOR_HOME: '__unset__' } });
+  assert.equal(res.status, 0);
+  const [file] = reportFiles(sb);
+  const report = JSON.parse(fs.readFileSync(path.join(sb.cwd, '.crossverify', file), 'utf8'));
+  assert.equal(report.second.promoted, true);
+  assert.equal(report.second.hollow, true);
+  assert.match(report.hollow_hint, /inspected nothing/);
+  assert.match(report.primary_error, /^codex exited with code 1/);
+  assert.ok(!report.primary_error.includes('\n'), 'primary_error is one line');
+  assert.match(readLog(sb), /second reviewer verdict is hollow/);
+});
+
+test('both reviewers failing logs both causes on one line each and writes no report', (t) => {
+  const sb = makeSecondSandbox(t, { primary: VERIFIED_VERDICT, second: VERIFIED_VERDICT });
+  const res = runOnDemand(sb, { env: { FAKE_CODEX_EXIT: '1' } });
+  assert.equal(res.status, 0);
+  assert.equal(reportFiles(sb).length, 0);
+  const log = readLog(sb);
+  assert.match(log, /both reviewers failed: primary \(codex exited with code 1[^\n]*\) second firerouter \(codex exited with code 1[^\n]*\)/);
 });

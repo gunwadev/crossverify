@@ -3,7 +3,9 @@
 // Node stdlib only. Config precedence and lock semantics: see README
 // "Configuration" and lib/config.mjs.
 
-import { existsSync, readFileSync, readdirSync, statSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, rmSync, unlinkSync, mkdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -40,6 +42,12 @@ function printUsage() {
     crossverify output global         Write reports to the global state dir
     crossverify pack <name>           Select a rule pack, e.g. crossverify pack default
     crossverify research on|off       Let the verifier use Codex's web-search tool for external-world claims
+    crossverify second on|off         Run a second, independent reviewer (FireRouter via Fireworks) in parallel
+    crossverify second setup          Create the second reviewer's Codex home via fireconnect (needs a Fireworks key)
+    crossverify second now            Re-verify the last turn right now with the second reviewer, print the report
+    crossverify second check          One tiny request to Fireworks: OK / SUSPENDED / RATE LIMITED / KEY REJECTED
+                                      (--transcript <path> to pick a transcript; --session <id> to pick a session)
+    crossverify gaps on|off           Include a gap analysis (missing/fragile things) in every report (default on)
     crossverify lock on               Lock global config: project conf may enable, never disable
     crossverify lock off              Remove the tamper lock
     crossverify status                Show resolved config and which layer decided each key
@@ -52,7 +60,7 @@ function printUsage() {
 }
 
 function printStatusTable(config) {
-  const keys = ['enabled', 'mode', 'output', 'pack', 'research', 'lock', 'failmode'];
+  const keys = ['enabled', 'mode', 'output', 'pack', 'research', 'second', 'gaps', 'lock', 'failmode'];
   const rows = keys.map((key) => [
     key,
     String(config[key]),
@@ -144,6 +152,201 @@ function cmdResearch(sub) {
   const cwd = process.cwd();
   setConfKey('project', 'research', sub, cwd);
   console.log(`crossverify: project research=${sub} written to ${projectConfPath(cwd)}`);
+  process.exit(0);
+}
+
+function secondHomePath() {
+  return path.join(stateDir(), 'codex-home-second');
+}
+
+// `crossverify second setup`: build a SEPARATE Codex home whose config.toml
+// routes through Fireworks (FireRouter), using fireconnect's own Codex
+// harness writer so the provider block, key reference and catalog are exactly
+// what fireconnect maintains. The hook then runs the second reviewer with
+// CODEX_HOME pointed here, leaving the user's real ~/.codex untouched.
+function cmdSecondSetup() {
+  const model = process.env.CROSSVERIFY_SECOND_MODEL && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(process.env.CROSSVERIFY_SECOND_MODEL)
+    ? process.env.CROSSVERIFY_SECOND_MODEL
+    : 'firerouter';
+  const probe = spawnSync('fireconnect', ['--version'], { encoding: 'utf8' });
+  if (probe.error || probe.status !== 0) {
+    console.error('crossverify: fireconnect not found on PATH.');
+    console.error('Install it (https://github.com/fw-ai/fireconnect), run `fireconnect login`, then re-run `crossverify second setup`.');
+    process.exit(1);
+  }
+  const home = secondHomePath();
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  const configPath = path.join(home, 'config.toml');
+  // --force: fireconnect refuses to write while the ChatGPT desktop app runs,
+  // because that app reads the SHARED ~/.codex/config.toml. This config is a
+  // separate file under our own state dir that the app never loads, so the
+  // guard does not apply here.
+  const args = ['codex', 'on', '--model', model, '--config-path', configPath, '--data-dir', path.join(home, 'fireconnect-state'), '--force'];
+  const res = spawnSync('fireconnect', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (res.stdout) process.stdout.write(res.stdout);
+  if (res.error || res.status !== 0 || !existsSync(configPath)) {
+    if (res.stderr) process.stderr.write(res.stderr);
+    console.error(`crossverify: fireconnect codex on failed (exit ${res.status ?? 'spawn error'}); second reviewer not configured.`);
+    process.exit(1);
+  }
+  const cwd = process.cwd();
+  setConfKey('project', 'second', 'on', cwd);
+  console.log(`crossverify: second reviewer ready — model=${model}, codex home ${home}`);
+  console.log(`crossverify: project second=on written to ${projectConfPath(cwd)}`);
+  console.log('Override the model with CROSSVERIFY_SECOND_MODEL; check with `crossverify status`.');
+  process.exit(0);
+}
+
+// Newest Claude Code transcript for this project: ~/.claude/projects/<key>/
+// where <key> is the cwd with every non-alphanumeric char replaced by '-'.
+function claudeProjectsDir() {
+  return path.join(os.homedir(), '.claude', 'projects');
+}
+
+function findLatestTranscript(cwd, sessionId) {
+  const key = path.resolve(cwd).replace(/[^A-Za-z0-9]/g, '-');
+  const dir = path.join(claudeProjectsDir(), key);
+  if (!existsSync(dir)) return null;
+  const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl') && (!sessionId || f === `${sessionId}.jsonl`));
+  let best = null; let bestM = -Infinity;
+  for (const f of files) {
+    const full = path.join(dir, f);
+    const m = statSync(full).mtimeMs;
+    if (m > bestM) { bestM = m; best = full; }
+  }
+  return best;
+}
+
+// `crossverify second now`: run the verifier once, foreground, with the second
+// reviewer forced on, against the newest transcript (or --transcript), and
+// print the report. Report-only: never blocks, never touches the attempt
+// counter. This is how the second reviewer is meant to be used when it is
+// too expensive or rate-limited to run on every Stop.
+function cmdSecondNow(argv) {
+  const cwd = process.cwd();
+  const secondConf = path.join(secondHomePath(), 'config.toml');
+  if (!existsSync(secondConf)) {
+    console.error(`crossverify: no second reviewer configured (missing ${secondConf}). Run \`crossverify second setup\` first.`);
+    process.exit(1);
+  }
+  const at = (flag) => { const i = argv.indexOf(flag); return i >= 0 ? argv[i + 1] : undefined; };
+  const sessionId = at('--session');
+  let transcript = at('--transcript');
+  if (!transcript) transcript = findLatestTranscript(cwd, sessionId);
+  if (!transcript || !existsSync(transcript)) {
+    console.error(`crossverify: no transcript found for this project${sessionId ? ` (session ${sessionId})` : ''}.`);
+    console.error(`Looked in: ${path.join(claudeProjectsDir(), path.resolve(cwd).replace(/[^A-Za-z0-9]/g, '-'))}`);
+    console.error('Pass one explicitly: crossverify second now --transcript <path/to/session.jsonl>');
+    process.exit(1);
+  }
+  const session = sessionId || path.basename(transcript, '.jsonl');
+  const verifier = fileURLToPath(new URL('./verifier.mjs', import.meta.url));
+  console.log(`crossverify: second reviewer run on ${path.basename(transcript)} (this can take a few minutes)...`);
+  const res = spawnSync(process.execPath, [verifier, '--on-demand'], {
+    cwd,
+    encoding: 'utf8',
+    input: JSON.stringify({ session_id: session, transcript_path: transcript, stop_hook_active: false, cwd }),
+    env: { ...process.env, CROSSVERIFY: process.env.CROSSVERIFY || '1' },
+  });
+  if (res.error || res.status !== 0) {
+    console.error(`crossverify: verifier run failed (${res.error ? res.error.message : `exit ${res.status}`}). See hook.log.`);
+    process.exit(1);
+  }
+  const config = resolveConfig({ cwd, env: process.env });
+  const latest = findNewestJsonReport(reportsDir(config, cwd), config.output === 'global' ? `${projectKey(cwd)}-` : '');
+  if (!latest || Date.now() - statSync(latest).mtimeMs > 10 * 60 * 1000) {
+    console.error('crossverify: no fresh report was written. Check `hook.log` (the run may have been skipped: disabled, or codex missing).');
+    process.exit(1);
+  }
+  cmdReport(['report']);
+}
+
+// Read the bits of the second reviewer's config.toml we need for a probe.
+// The file is fireconnect's; we only read it (a few fixed keys), never parse
+// TOML generally.
+function readSecondProvider() {
+  const confPath = path.join(secondHomePath(), 'config.toml');
+  if (!existsSync(confPath)) return null;
+  const text = readFileSync(confPath, 'utf8');
+  const pick = (key) => {
+    const m = text.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"`, 'm'));
+    return m ? m[1] : undefined;
+  };
+  return { model: pick('model') || 'firerouter', baseUrl: pick('base_url') || 'https://api.fireworks.ai/inference/v1', key: pick('experimental_bearer_token') };
+}
+
+// `crossverify second check`: the smallest possible real request (1 token)
+// through the second reviewer's provider, so "is Fireworks working for me"
+// has a yes/no answer before a verify run spends minutes finding out.
+// Exit 0 = usable, 2 = not usable right now (reason printed), 1 = not set up.
+async function cmdSecondCheck() {
+  const prov = readSecondProvider();
+  if (!prov || !prov.key) {
+    console.error('crossverify: second reviewer not configured. Run `crossverify second setup` first.');
+    process.exit(1);
+  }
+  const url = `${prov.baseUrl.replace(/\/$/, '')}/chat/completions`;
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${prov.key}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: prov.model, max_tokens: 1, messages: [{ role: 'user', content: 'ok' }] }),
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch (err) {
+    console.log(`Fireworks: UNREACHABLE — ${err.message} (${url})`);
+    process.exit(2);
+  }
+  const text = await res.text();
+  let msg = '';
+  try { msg = JSON.parse(text)?.error?.message || ''; } catch { /* non-JSON body */ }
+  if (res.status === 200) {
+    let served = '';
+    try { served = JSON.parse(text)?.model || ''; } catch { /* ignore */ }
+    console.log(`Fireworks: OK — model ${prov.model}${served ? ` served by ${served}` : ''}. The second reviewer can run now.`);
+    process.exit(0);
+  }
+  if (res.status === 412) {
+    console.log(`Fireworks: SUSPENDED (HTTP 412) — ${msg || 'account suspended'}`);
+    console.log('Fix at https://fireworks.ai/account/billing (spending limit or unpaid invoice). The second reviewer will fail open until then.');
+  } else if (res.status === 429) {
+    const ra = res.headers.get('retry-after');
+    console.log(`Fireworks: RATE LIMITED (HTTP 429)${ra ? ` — retry in ${ra}s` : ''}. ${msg}`.trim());
+    console.log('The key is shared with anything else routed through Fireworks on this machine; wait, or run the check again later.');
+  } else if (res.status === 401 || res.status === 403) {
+    console.log(`Fireworks: KEY REJECTED (HTTP ${res.status}). Run \`fireconnect login\` then \`crossverify second setup\` to re-mint the config.`);
+  } else {
+    console.log(`Fireworks: HTTP ${res.status} — ${msg || text.slice(0, 200)}`);
+  }
+  process.exit(2);
+}
+
+function cmdSecond(sub, argv) {
+  if (sub === 'setup') return cmdSecondSetup();
+  if (sub === 'check') return cmdSecondCheck();
+  if (sub === 'now') return cmdSecondNow(argv);
+  if (sub !== 'on' && sub !== 'off') {
+    printUsage();
+    process.exit(1);
+  }
+  const cwd = process.cwd();
+  setConfKey('project', 'second', sub, cwd);
+  console.log(`crossverify: project second=${sub} written to ${projectConfPath(cwd)}`);
+  if (sub === 'on' && !existsSync(path.join(secondHomePath(), 'config.toml'))) {
+    console.log('note: no second reviewer codex home yet — run `crossverify second setup` or the hook will skip it (fail-open).');
+  }
+  process.exit(0);
+}
+
+function cmdGaps(sub) {
+  if (sub !== 'on' && sub !== 'off') {
+    printUsage();
+    process.exit(1);
+  }
+  const cwd = process.cwd();
+  setConfKey('project', 'gaps', sub, cwd);
+  console.log(`crossverify: project gaps=${sub} written to ${projectConfPath(cwd)}`);
   process.exit(0);
 }
 
@@ -256,8 +459,22 @@ function cmdReport(argv) {
     if (detail) console.log(`      ${c('2', `└ ${detail}`)}`);
   }
   if (rows.length) console.log();
+  const gaps = (Array.isArray(verdict.gaps) ? verdict.gaps : []).filter((g) => g && typeof g.gap === 'string');
+  for (const g of gaps) {
+    console.log(`  ${c('35', '!')} ${c('35', g.classification ?? 'GAP')} ${g.gap}`);
+    const detail = [firstSentence(g.evidence), g.fix ? `fix: ${firstSentence(g.fix)}` : ''].filter(Boolean).join(' · ');
+    if (detail) console.log(`      ${c('2', `└ ${detail}`)}`);
+  }
+  if (gaps.length) console.log();
   const nv = (verdict.verified ?? []).length, nf = countFailedClaims(verdict), nu = (verdict.could_not_verify ?? []).length;
-  console.log(`  ${c('32', `${nv} verified`)} ${c('2', '·')} ${c(nf ? '31' : '2', `${nf} failed`)} ${c('2', '·')} ${c(nu ? '33' : '2', `${nu} unverified`)}`);
+  console.log(`  ${c('32', `${nv} verified`)} ${c('2', '·')} ${c(nf ? '31' : '2', `${nf} failed`)} ${c('2', '·')} ${c(nu ? '33' : '2', `${nu} unverified`)}${gaps.length ? ` ${c('2', '·')} ${c('35', `${gaps.length} gap${gaps.length === 1 ? '' : 's'}`)}` : ''}`);
+  if (verdict.second && typeof verdict.second === 'object') {
+    const sec = verdict.second;
+    const tail = sec.status === 'error' ? `error: ${firstSentence(sec.error)}`
+      : sec.promoted ? `(stands alone: primary failed: ${firstSentence(verdict.primary_error)})${sec.hollow ? ' — HOLLOW: inspected nothing, treat as no verdict' : ''}`
+        : (sec.agreed ? '(agrees)' : '(disagrees)');
+    console.log(`  ${c('2', `second reviewer ${sec.model ?? '?'}: ${sec.status ?? '?'} ${tail}`)}`);
+  }
   console.log();
   if (status === 'failed') console.log(`  ${c('1;31', '■ BLOCK')} — builder was sent the failed claims as feedback`);
   else if (status === 'verified') console.log(`  ${c('1;32', '■ PASS')} — all claims verified`);
@@ -361,6 +578,12 @@ async function main() {
       break;
     case 'research':
       cmdResearch(argv[1]);
+      break;
+    case 'second':
+      cmdSecond(argv[1], argv.slice(2));
+      break;
+    case 'gaps':
+      cmdGaps(argv[1]);
       break;
     case 'lock':
       cmdLock(argv[1]);
