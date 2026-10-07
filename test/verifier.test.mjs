@@ -72,7 +72,16 @@ function makeSandbox(t, { transcript = MUTATION_TRANSCRIPT, verdict = VERIFIED_V
   // maxRetries: a detached background child may still be deleting its own
   // staged files while this rm walks the tree (transient ENOTEMPTY race;
   // EBUSY seen on Windows CI holding the dir for >1s — hence the long tail).
-  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 250 }));
+  // Best-effort: on Windows the detached background child can still hold the
+  // sandbox open past the retry window (EBUSY seen on CI even at 30x250ms).
+  // A leaked temp dir is not a test failure; every assertion already ran.
+  t.after(() => {
+    try {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 250 });
+    } catch (err) {
+      if (err.code !== 'EBUSY' && err.code !== 'ENOTEMPTY' && err.code !== 'EPERM') throw err;
+    }
+  });
   const home = path.join(root, 'home');
   const cwd = path.join(root, 'project');
   const bin = path.join(root, 'bin');
