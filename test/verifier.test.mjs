@@ -676,7 +676,7 @@ test('security: malformed CROSSVERIFY_MODEL is rejected, not passed through', as
   assert.equal(res.status, 0);
   const log = readLog(sb);
   assert.match(log, /warn: ignoring malformed CROSSVERIFY_MODEL=gpt-5&whoami&rem/);
-  assert.match(log, /model=gpt-5\.4/, 'must fall back to the default model');
+  assert.match(log, /model=codex default/, "must fall back to codex's own model");
   await waitForReports(sb);
 });
 

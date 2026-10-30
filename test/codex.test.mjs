@@ -153,6 +153,25 @@ test('runCodex passes codexHome to the child as CODEX_HOME', async () => {
   });
 });
 
+// No CROSSVERIFY_MODEL: codex picks its own configured model, which is always
+// one the user's login can run (a ChatGPT login rejects API-only models).
+test('runCodex omits --model when no model is given', async () => {
+  await withFakeCodex({ echoArgs: true }, async ({ dir, schemaPath }) => {
+    const res = await runCodex({ prompt: 'p', cwd: dir, schemaPath, timeoutMs: 5000 });
+    assert.equal(res.ok, true);
+    assert.equal(JSON.parse(res.verdict.feedback).includes('--model'), false);
+  });
+});
+
+test('runCodex passes --model when a model is given', async () => {
+  await withFakeCodex({ echoArgs: true }, async ({ dir, schemaPath }) => {
+    const res = await runCodex({ prompt: 'p', cwd: dir, model: 'gpt-5.4-mini', schemaPath, timeoutMs: 5000 });
+    assert.equal(res.ok, true);
+    const args = JSON.parse(res.verdict.feedback);
+    assert.equal(args[args.indexOf('--model') + 1], 'gpt-5.4-mini');
+  });
+});
+
 // ---- security regressions ----
 
 // On Windows a `.cmd` shim can't be spawned with shell:false, so the argv

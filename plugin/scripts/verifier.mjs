@@ -38,7 +38,6 @@ const VERIFIER_DIR = path.join(SCRIPT_DIR, '..', 'verifier');
 
 export const MAX_ATTEMPTS = 2;
 const CODEX_TIMEOUT_MS = 180_000;
-const DEFAULT_MODEL = 'gpt-5.4';
 // Second reviewer: same read-only codex run through a DIFFERENT provider.
 // Its CODEX_HOME holds a config.toml routing to Fireworks (FireRouter by
 // default); `crossverify second setup` writes it via fireconnect.
@@ -443,7 +442,8 @@ async function main() {
   const runningMarker = path.join(reportDir, `${namePrefix}${sessionId}-${ts}.running`);
 
   const envModel = process.env.CROSSVERIFY_MODEL;
-  let model = DEFAULT_MODEL;
+  // Unset: codex uses its own configured model, one the user's login can run.
+  let model;
   if (envModel) {
     if (MODEL_RE.test(envModel)) model = envModel;
     else log(`warn: ignoring malformed CROSSVERIFY_MODEL=${envModel}`);
@@ -498,13 +498,13 @@ async function main() {
       try { log(`background spawn error: ${err.message}`); } catch { /* never throw */ }
     });
     child.unref();
-    log(`background verify launched model=${model} (report will land at ${reportFile})`);
+    log(`background verify launched model=${model || 'codex default'} (report will land at ${reportFile})`);
     return;
   }
 
   // FOREGROUND mode: wait for the verdict, block on a failed one.
   fs.writeFileSync(runningMarker, '');
-  log(`running codex model=${model} attempt=${attempts + 1} mode=foreground`);
+  log(`running codex model=${model || 'codex default'} attempt=${attempts + 1} mode=foreground`);
   const { result, verdict: reviewed } = await runReviewers({
     prompt, cwd, model, schemaPath, timeoutMs: CODEX_TIMEOUT_MS, codexHome, second, mutated,
   });

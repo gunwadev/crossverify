@@ -138,7 +138,7 @@ export function runCodex({ prompt, cwd, model, schemaPath, timeoutMs, codexHome,
     // Root-level flag: must precede the `exec` subcommand.
     ...(search ? ['--search'] : []),
     'exec',
-    '--model', model,
+    ...(model ? ['--model', model] : []),
     '--sandbox', 'read-only',
     '--skip-git-repo-check',
     '--cd', cwd,
